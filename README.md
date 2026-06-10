@@ -37,6 +37,90 @@ El proyecto está dockerizado para facilitar su ejecución y despliegue sin depe
 
 El índice inverso es el "corazón" del motor de búsqueda. Se genera a través de un flujo de procesamiento por lotes (*batch*) dividido en 5 scripts principales ejecutados en secuencia.
 
+### Diagrama del Proceso Batch
+
+```mermaid
+flowchart TD
+    %% Estilos de Nodos
+    classDef startBlock fill:#e1f5fe,stroke:#039be5,stroke-width:2px;
+    classDef processBlock fill:#e8f5e9,stroke:#43a047,stroke-width:2px;
+    classDef sortBlock fill:#fff3e0,stroke:#fb8c00,stroke-width:2px;
+    classDef dbBlock fill:#ede7f6,stroke:#5e35b1,stroke-width:2px;
+    classDef fileBlock fill:#fce4ec,stroke:#d81b60,stroke-width:2px;
+
+    %% Bloque de Partida (Google Drive)
+    subgraph Partida["Bloque de Partida"]
+        GD["Google Drive<br/>(Carpeta Académica Root)"]
+    end
+
+    %% 1. CRAWLER
+    subgraph crawler_sub["1. crawler.py"]
+        C1["Extraer metadatos de archivos académicos (DFS)"]
+    end
+
+    %% 2. DATA INGESTION
+    subgraph ingestion_sub["2. dataIngestion.py"]
+        I1["Descargar archivos binarios en paralelo (15 hilos)"]
+        I2["Extraer texto con Apache Tika y normalizar a minúsculas"]
+    end
+
+    %% Archivo intermedio
+    subgraph file_plano_sub["Archivo Plano Intermedio"]
+        F1["ingesta_intermedia_uni.txt"]
+    end
+
+    %% 3. INDEX MAKER
+    subgraph indexmaker_sub["3. indexMaker.py"]
+        M1["Agrupar tokens del vocabulario en memoria"]
+        M2{"Ordenar documentos por frecuencia de mayor a menor"}
+    end
+
+    %% Archivo final JSONL
+    subgraph file_jsonl_sub["Archivo Final JSONL"]
+        F2["indice_invertido_final.jsonl"]
+    end
+
+    %% 4. LENGTH CALCULATOR
+    subgraph lencalc_sub["4. lenCalculator.py"]
+        L1["Calcular cantidad de palabras de cada documento (longitud)"]
+    end
+
+    %% 5. LOAD
+    subgraph load_sub["5. load.py"]
+        LD1["Cargar índice de forma masiva (Batch INSERT/ON CONFLICT)"]
+    end
+
+    %% Base de Datos
+    subgraph BD["Base de Datos PostgreSQL"]
+        DB_DI[("Tabla: documentos_indexados")]
+        DB_IDU[("Tabla: indice_docu_uni")]
+    end
+
+    %% Flujo principal
+    GD --> C1
+    C1 --> I1
+    I1 --> I2
+    I2 --> F1
+    F1 --> M1
+    M1 --> M2
+    M2 --> F2
+    F1 --> L1
+    F2 --> LD1
+
+    %% Conexiones a BD
+    C1 -->|1. Carga metadata inicial| DB_DI
+    I2 -->|2. Actualiza flag procesado = TRUE| DB_DI
+    L1 -->|3. Actualiza campo longitud masivamente| DB_DI
+    LD1 -->|4. Carga índice inverso final| DB_IDU
+
+    %% Aplicar estilos
+    class GD startBlock;
+    class C1,I1,I2,M1,L1,LD1 processBlock;
+    class M2 sortBlock;
+    class F1,F2 fileBlock;
+    class DB_DI,DB_IDU dbBlock;
+```
+
 ### 1. `crawler.py`
 - **¿Qué hace?**: Se encarga de navegar o conectarse a los orígenes de datos (como Google Drive u otros repositorios) para extraer los documentos crudos y/o su metadata (nombre original, categoría, URLs de acceso).
 - **Formato de entrada**: APIs externas o sistema de archivos.
@@ -150,5 +234,78 @@ El backend y frontend de la aplicación web interactúan con la base de datos pa
   - **`aplicativo/static/js/main.js`**: Controlador del lado del cliente. Escucha el formulario de búsqueda, se comunica asíncronamente con el endpoint `/api/search` usando `fetch`, maneja la paginación dinámica y construye dinámicamente el HTML de las tarjetas de resultados donde se exhiben los detalles, el puntaje BM25 y enlaces a Drive.
 
 - **Base de Datos (PostgreSQL)**:
-  - **`documentos_indexados`**: Guarda los metadatos visuales de los documentos (nombre, categoría, URL) y la `longitud` (para BM25).
-  - **`indice_docu_uni`**: Tabla que mapea la palabra a un campo `JSONB` que contiene una matriz de objetos con el ID del documento y la frecuencia. Tiene un índice tipo `GIN` que permite búsquedas inversas a velocidades de milisegundos.
+  - Consiste en dos tablas optimizadas y debidamente indexadas para dar soporte a búsquedas en milisegundos. Para ver el detalle técnico del diccionario de datos y diagramas, consulta la sección **[4. Modelo y Diseño de la Base de Datos](#4-modelo-y-diseño-de-la-base-de-datos)**.
+
+---
+
+## 4. Modelo y Diseño de la Base de Datos
+
+Para una exposición o sustentación técnica, el diseño físico y lógico de la base de datos es clave. El sistema utiliza **PostgreSQL** y cuenta con dos tablas principales y un conjunto de índices optimizados.
+
+### Relación de Datos (ERD Lógico)
+A continuación se ilustra la relación entre las tablas mediante un diagrama de entidad-relación (ERD):
+
+```mermaid
+erDiagram
+    documentos_indexados {
+        SERIAL id PK "Entero auto-incremental (32 bits)"
+        VARCHAR id_drive UK "Identificador único de Google Drive (hasta 3,200 bits)"
+        VARCHAR nombre_original "Nombre del archivo (hasta 8,160 bits)"
+        VARCHAR nombre_compuesto "Nombre compuesto (hasta 16,000 bits)"
+        VARCHAR categoria_principal "Categoría (hasta 4,800 bits)"
+        TEXT url_acceso "URL del documento (longitud variable)"
+        TIMESTAMP fecha_indexacion "Fecha/Hora (64 bits)"
+        BOOLEAN procesado "Estado (8 bits)"
+        INTEGER longitud "Cantidad de palabras (32 bits)"
+    }
+    indice_docu_uni {
+        SERIAL id PK "Entero auto-incremental (32 bits)"
+        VARCHAR palabra UK "Token único indexado (hasta 4,800 bits)"
+        JSONB documentos "Arreglo con id_drive y frecuencias (longitud variable)"
+    }
+    indice_docu_uni }o--o{ documentos_indexados : "asocia lógicamente (JSONB.id_drive -> id_drive)"
+```
+
+### Detalle Técnico de Tablas (Diccionario de Datos)
+
+#### 📋 Tabla: `documentos_indexados`
+Esta tabla registra la información de catálogo, metadatos y longitudes de los documentos académicos.
+
+| Campo (Nombre) | Tipo de Variable (PostgreSQL) | Longitud (en bits) | Descripción / Propósito |
+| :--- | :--- | :--- | :--- |
+| **`id`** | `SERIAL` (INTEGER) | **32 bits** (4 bytes) | Clave primaria autoincremental de la tabla. |
+| **`id_drive`** | `VARCHAR(100)` | **Hasta 3,200 bits** *(1)* | Identificador único del archivo en Google Drive (Clave Única / Restricción `UNIQUE`). |
+| **`nombre_original`** | `VARCHAR(255)` | **Hasta 8,160 bits** *(1)* | Nombre del archivo físico original tal como fue subido por el alumno. |
+| **`nombre_compuesto`** | `VARCHAR(500)` | **Hasta 16,000 bits** *(1)* | Nombre normalizado o estructurado que facilita la identificación. |
+| **`categoria_principal`** | `VARCHAR(150)` | **Hasta 4,800 bits** *(1)* | Especialidad o categoría académica principal (ej. *Sistemas Operativos*). |
+| **`url_acceso`** | `TEXT` | **Variable** *(2)* | Dirección URL directa del recurso digital para visualizarlo o descargarlo. |
+| **`fecha_indexacion`** | `TIMESTAMP` | **64 bits** (8 bytes) | Fecha y hora de inserción del registro (default: `CURRENT_TIMESTAMP`). |
+| **`procesado`** | `BOOLEAN` | **8 bits** (1 byte físico) | Bandera que indica si el documento ya ha sido analizado e incorporado al índice. |
+| **`longitud`** | `INTEGER` | **32 bits** (4 bytes) | Número de palabras totales del documento (crítico para penalización BM25). |
+
+> *(1) Nota sobre VARCHAR:* PostgreSQL almacena `VARCHAR` usando codificación UTF-8. Un carácter puede consumir de 1 a 4 bytes (8 a 32 bits). En codificación básica ASCII, la longitud máxima es de 8 bits por carácter; el cálculo superior asume el peor escenario de 32 bits por carácter UTF-8.
+> *(2) Nota sobre TEXT:* El tipo `TEXT` tiene una longitud variable que admite hasta 1 GB de información (~8.58 × 10⁹ bits) por registro.
+
+---
+
+#### 📋 Tabla: `indice_docu_uni`
+Esta tabla representa el **Índice Inverso**, donde se asocia cada palabra con los documentos que la contienen.
+
+| Campo (Nombre) | Tipo de Variable (PostgreSQL) | Longitud (en bits) | Descripción / Propósito |
+| :--- | :--- | :--- | :--- |
+| **`id`** | `SERIAL` (INTEGER) | **32 bits** (4 bytes) | Clave primaria autoincremental de la tabla. |
+| **`palabra`** | `VARCHAR(150)` | **Hasta 4,800 bits** *(1)* | Token o palabra única indexada del vocabulario general (Clave Única / `UNIQUE`). |
+| **`documentos`** | `JSONB` | **Variable** *(3)* | Estructura JSON binaria que almacena un arreglo con el `id_drive` y la frecuencia (`tf`) de la palabra en cada archivo. |
+
+> *(3) Nota sobre JSONB:* El tipo de dato JSON binario almacena colecciones estructuradas optimizadas de forma física. Al igual que `TEXT`, su límite superior físico en PostgreSQL es de 1 GB (~8.58 × 10⁹ bits).
+
+---
+
+### Índices de Rendimiento y Optimización
+Para lograr tiempos de respuesta en milisegundos durante las consultas del algoritmo BM25, se implementaron dos índices fundamentales:
+
+1. **`idx_indice_palabra` (B-Tree sobre `palabra`)**:
+   - Permite que la búsqueda exacta de un token en la tabla `indice_docu_uni` sea de complejidad temporal $O(\log n)$, localizando el registro de manera casi instantánea.
+2. **`idx_jsonb_documentos` (GIN - Generalized Inverted Index sobre `documentos`)**:
+   - Un índice GIN está especialmente diseñado para colecciones y objetos compuestos como `JSONB`. Permite indexar las claves internas y elementos del JSON de forma que Postgres pueda resolver consultas de contención o filtrado directo sin hacer un escaneo completo de la tabla (*sequential scan*).
+
