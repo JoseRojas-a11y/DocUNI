@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DocUNI - Buscador de Documentos</title>
+    <meta name="description"
+        content="Buscador rápido e inteligente de documentos indexados de DocuUNI. Encuentra documentos mediante índice inverso de palabras clave.">
+    <!-- Google Fonts - Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Lucide Icons CDN -->
+    <link rel="icon" type="image/ico" href="../static/favicon.ico" sizes="32x32">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='1.0.3') }}">
+</head>
+
+<body>
+    <div class="glass-bg-decor decor-1"></div>
+    <div class="glass-bg-decor decor-2"></div>
+
+    <main class="app-container">
+        <!-- Header Section -->
+        <header class="search-header">
+            <div class="brand-logo">
+                <i data-lucide="binary" class="brand-icon"></i>
+                <h1 class="brand-name">Doc<span>UNI</span></h1>
+            </div>
+            <p class="brand-tagline">Buscador Inteligente de Planchas y Documentos</p>
+        </header>
+
+        <!-- Search Bar Section -->
+        <section class="search-section">
+            <p class="brand-tagline">Sugerencia: Busca cursos por su código</p>
+            <form id="search-form" class="search-form-container glass-panel" onsubmit="event.preventDefault();">
+                <div class="search-input-wrapper">
+                    <i data-lucide="search" class="search-icon"></i>
+                    <input type="text" id="search-input"
+                        placeholder="Ingresa palabras clave (ej. planchas, sistemas)..." autocomplete="off" autofocus>
+                    <button type="button" id="clear-button" class="clear-btn" title="Limpiar búsqueda"
+                        style="display: none;">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
+                <button type="submit" id="search-button" class="search-btn">
+                    <span>Buscar</span>
+                    <i data-lucide="arrow-right"></i>
+                </button>
+            </form>
+        </section>
+
+        <!-- Stats Bar -->
+        <section id="stats-bar" class="stats-bar-container" style="display: none;">
+            <div class="stats-content glass-panel">
+                <span id="search-stats-text">Se encontraron 0 documentos en 0.0000 s</span>
+                <span id="search-terms-tags" class="search-tags-list"></span>
+            </div>
+        </section>
+
+        <!-- Results Area -->
+        <section class="results-section">
+            <!-- Loading Indicator -->
+            <div id="loading-state" class="status-indicator" style="display: none;">
+                <div class="spinner"></div>
+                <p>Buscando en el índice inverso...</p>
+            </div>
+
+            <!-- Empty / Initial State -->
+            <div id="empty-state" class="status-indicator glass-panel">
+                <i data-lucide="folder-search" class="state-icon"></i>
+                <h2>Comienza tu búsqueda</h2>
+                <p>Escribe una o más palabras para encontrar documentos. Los resultados se ordenarán de forma
+                    inteligente dando prioridad a las coincidencias exactas de todos los términos.</p>
+            </div>
+
+            <!-- No Results State -->
+            <div id="no-results-state" class="status-indicator glass-panel" style="display: none;">
+                <i data-lucide="info" class="state-icon"></i>
+                <h2>Sin coincidencias</h2>
+                <p>No se encontraron documentos que contengan ninguna de las palabras ingresadas. Intenta con otros
+                    términos.</p>
+            </div>
+
+            <!-- Results List -->
+            <div id="results-container" class="results-grid" style="display: none;">
+                <!-- Result Cards will be injected here dynamically -->
+            </div>
+        </section>
+
+        <!-- Pagination Section -->
+        <section id="pagination-section" class="pagination-container" style="display: none;">
+            <div class="pagination-wrapper glass-panel">
+                <button id="prev-btn" class="page-nav-btn" title="Página anterior">
+                    <i data-lucide="chevron-left"></i>
+                    <span>Anterior</span>
+                </button>
+
+                <div id="page-numbers" class="page-numbers-list">
+                    <!-- Page buttons will be injected here -->
+                </div>
+
+                <button id="next-btn" class="page-nav-btn" title="Página siguiente">
+                    <span>Siguiente</span>
+                    <i data-lucide="chevron-right"></i>
+                </button>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+        <p>DocUNI &copy; 2026 &bull; Motor de Búsqueda de Índice Inverso</p>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/main.js', v='1.0.3') }}"></script>
+</body>
+
+</html>

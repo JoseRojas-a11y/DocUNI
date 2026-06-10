@@ -1,0 +1,9 @@
+*.txt
+*.jsonl
+*.json
+*.csv
+*.pyc
+__pycache__/
+
+documentos_data
+indice_docu_data

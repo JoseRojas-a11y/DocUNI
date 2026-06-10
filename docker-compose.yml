@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: docuni-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: dbd_planchas
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: JoSeSiTo%_10
+    volumes:
+      # Esquema de la base de datos
+      - ./CREATE_SQL.sql:/docker-entrypoint-initdb.d/1-schema.sql
+      # Script SQL que ejecuta la carga masiva mediante COPY
+      - ./docker-init-data.sql:/docker-entrypoint-initdb.d/2-data.sql
+      # Archivos CSV origen montados en la carpeta de inicialización
+      - ./documentos_data:/docker-entrypoint-initdb.d/documentos_data
+      - ./indice_docu_data:/docker-entrypoint-initdb.d/indice_docu_data
+      # Volumen persistente de PostgreSQL
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dbd_planchas"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: docuni-web
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=dbd_planchas
+      - DB_USER=postgres
+      - DB_PASSWORD=JoSeSiTo%_10
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
