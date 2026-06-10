@@ -13,7 +13,10 @@ El proyecto está dockerizado para facilitar su ejecución y despliegue sin depe
 - Tener los puertos `5000` (Web) y `5432` (PostgreSQL) disponibles en tu máquina.
 
 ### Pasos para ejecutar:
-1. Asegúrate de tener los archivos CSV generados por el proceso batch (Se encuentra en los .zip de DATA) dentro de la carpeta principal y de `archivos_planos` en el carpeta de `proceso_batch`. Estos son utilizados por el script de inicialización `docker-init-data.sql` para poblar la base de datos de manera súper rápida usando el comando `COPY`. Colocar la descrompreción del `DATA.zip` raiz en la misma raiz del proyecto
+1. Asegúrate de tener los archivos CSV generados por el proceso batch. Estos documentos se encuentran dentro de "https://drive.google.com/drive/folders/1Z1pa3MrlHYy0LpVogrYO8N58bN2YRFaC?usp=drive_link". 
+
+**Nota**: Estos son utilizados por el script de inicialización `docker-init-data.sql` para poblar la base de datos de manera súper rápida usando el comando `COPY`. Colocar la descrompreción del `DATA.zip` raiz en la misma raiz del proyecto. Colocar `Tablas-temporales.zip` dentro de la carpeta `proceso_batch/archivos_planos`.
+
 2. Abre una terminal en la raíz del proyecto.
 3. Ejecuta el siguiente comando para construir las imágenes y levantar los contenedores:
    ```bash
