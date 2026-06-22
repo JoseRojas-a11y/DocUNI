@@ -1,13 +1,24 @@
 import sys
 import os
+import json
 from typing import List, Optional
-import psycopg2  # Reemplazar por supabase si usas su cliente nativo
+
+# Configurar stdout y stderr para usar UTF-8 y evitar errores de codificación en Windows
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+# Importar utilidades de checkpoint
+from checkpoint_utils import cargar_checkpoint, guardar_checkpoint, truncar_archivo_por_lineas, obtener_argumentos_reset
 
 # Alcance (Scope) limitado a solo lectura de archivos de Drive
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
@@ -16,22 +27,37 @@ SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 rutaTokens = os.path.abspath(os.path.join(BASE_DIR, '..', 'token.json'))
 rutaCredentials = os.path.abspath(os.path.join(BASE_DIR, '..', 'credentials.json'))
+rutaCrawled = os.path.abspath(os.path.join(BASE_DIR, '..', 'archivos_planos', 'crawled_documents.jsonl'))
 
-# Añadir la raíz del proyecto al sys.path para poder importar db_config
-sys.path.append(os.path.abspath(os.path.join(BASE_DIR, '..', '..')))
-from db_config import DB_CONFIG
+# Variables globales para control de bloques y checkpoints
+TAMANO_BLOQUE = 50
+buffer_bloque = []
+processed_folders = set()
+crawled_file_ids = set()
+total_archivos = 0
 
 def obtener_servicio_drive():
     """Maneja el flujo de autenticación OAuth2 y retorna el cliente de la API."""
     creds = None
-    # El archivo token.json almacena los tokens de acceso y refresco del usuario
     if os.path.exists(rutaTokens):
         creds = Credentials.from_authorized_user_file(rutaTokens, SCOPES)
         
-    # Si no hay credenciales válidas disponibles, deja que el usuario inicie sesión.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                print(f"[*] Advertencia: No se pudo refrescar el token ({e}). Re-autenticando...")
+                if os.path.exists(rutaTokens):
+                    try:
+                        os.remove(rutaTokens)
+                    except Exception:
+                        pass
+                if not os.path.exists(rutaCredentials):
+                    raise FileNotFoundError("Por favor descarga 'credentials.json' desde Google Cloud Console.")
+                
+                flow = InstalledAppFlow.from_client_secrets_file(rutaCredentials, SCOPES)
+                creds = flow.run_local_server(port=0)
         else:
             if not os.path.exists(rutaCredentials):
                 raise FileNotFoundError("Por favor descarga 'credentials.json' desde Google Cloud Console.")
@@ -39,44 +65,51 @@ def obtener_servicio_drive():
             flow = InstalledAppFlow.from_client_secrets_file(rutaCredentials, SCOPES)
             creds = flow.run_local_server(port=0)
             
-        # Guarda las credenciales para la próxima ejecución
         with open(rutaTokens, 'w') as token:
             token.write(creds.to_json())
 
     return build('drive', 'v3', credentials=creds)
 
-def guardar_en_db(id_drive: str, nombre_orig: str, nombre_comp: str, cat_principal: str, url: str):
-    """Inserta o actualiza el registro en la base de datos."""
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-        
-        query = """
-            INSERT INTO documentos_indexados (id_drive, nombre_original, nombre_compuesto, categoria_principal, url_acceso)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (id_drive) DO UPDATE 
-            SET nombre_compuesto = EXCLUDED.nombre_compuesto,
-                categoria_principal = EXCLUDED.categoria_principal,
-                url_acceso = EXCLUDED.url_acceso;
-        """
-        cursor.execute(query, (id_drive, nombre_orig, nombre_comp, cat_principal, url))
-        conn.commit()
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        print(f"[-] Error al guardar en BD el archivo {nombre_orig}: {e}")
+def guardar_bloque_crawler(f_out):
+    """Escribe los documentos en el buffer al archivo plano y actualiza el checkpoint."""
+    global buffer_bloque, processed_folders, total_archivos
+    if not buffer_bloque:
+        return
 
-def recorrer_carpeta(service, folder_id: str, primera_carpeta: Optional[str] = None, ruta_actual: List[str] = []):
+    print(f"[*] Escribiendo bloque de {len(buffer_bloque)} archivos a disco...")
+    for registro in buffer_bloque:
+        linea = json.dumps(registro, ensure_ascii=False) + '\n'
+        f_out.write(linea)
+        total_archivos += 1
+    
+    f_out.flush()
+    
+    # Actualizar checkpoint
+    checkpoint_data = {
+        "processed_folders": list(processed_folders),
+        "total_archivos": total_archivos
+    }
+    guardar_checkpoint("crawler", checkpoint_data)
+    
+    # Limpiar buffer
+    buffer_bloque.clear()
+
+def recorrer_carpeta(service, folder_id: str, f_out, primera_carpeta: Optional[str] = None, ruta_actual: List[str] = []):
     """
     Recorre de forma recursiva (DFS) las carpetas de Google Drive.
-    Mantiene el estado de la ruta y extrae los metadatos de los archivos.
+    Utiliza un buffer de bloques para escribir en f_out y salta carpetas completadas.
     """
+    global processed_folders, crawled_file_ids, buffer_bloque
+    
+    if folder_id in processed_folders:
+        print(f"[*] Omitiendo carpeta ID {folder_id} (ya procesada completamente).")
+        return
+
     print(f"[>] Explorando carpeta ID: {folder_id} | Ruta acumulada: {' / '.join(ruta_actual)}")
     page_token = None
 
     while True:
         try:
-            # Consultamos los elementos hijos directos de la carpeta actual
             query = f"'{folder_id}' in parents and trashed = false"
             fields = "nextPageToken, files(id, name, mimeType, webViewLink)"
             
@@ -95,33 +128,31 @@ def recorrer_carpeta(service, folder_id: str, primera_carpeta: Optional[str] = N
                 item_type = item['mimeType']
                 
                 if item_type == 'application/vnd.google-apps.folder':
-                    # Si estamos en el primer nivel debajo de la raíz, esta es la "primera carpeta"
                     nueva_primera_carpeta = item_name if primera_carpeta is None else primera_carpeta
-                    
-                    # Agregamos la carpeta actual al stack de la ruta
                     nueva_ruta = ruta_actual + [item_name]
-                    
-                    # Llamada recursiva hacia la subcarpeta
-                    recorrer_carpeta(service, item_id, nueva_primera_carpeta, nueva_ruta)
-                    
+                    # Recursión
+                    recorrer_carpeta(service, item_id, f_out, nueva_primera_carpeta, nueva_ruta)
                 else:
-                    # Es un archivo (libro, pdf, etc.)
-                    # Si el archivo está directo en la raíz sin subcarpetas, la categoría es 'Raíz'
-                    cat_final = primera_carpeta if primera_carpeta else "Raíz"
-                    
-                    # Construimos el nombre compuesto uniendo las carpetas y el nombre original
-                    # Reemplazamos espacios por guiones bajos para estandarizar
+                    # Si ya está indexado antes del checkpoint, omitir
+                    if item_id in crawled_file_ids:
+                        continue
+                        
                     componentes_nombre = ruta_actual + [item_name]
                     nombre_compuesto = "_".join(componentes_nombre).replace(" ", "_")
-                    
                     url_acceso = item.get('webViewLink', '')
                     
-                    print(f"[+] Archivo encontrado: {item_name}")
-                    print(f"    -> Categoría Principal: {cat_final}")
-                    print(f"    -> Nombre Compuesto: {nombre_compuesto}")
+                    registro = {
+                        "id_drive": item_id,
+                        "nombre_compuesto": nombre_compuesto,
+                        "url_acceso": url_acceso,
+                        "primera_carpeta": primera_carpeta
+                    }
                     
-                    # Persistencia
-                    guardar_en_db(item_id, item_name, nombre_compuesto, cat_final, url_acceso)
+                    buffer_bloque.append(registro)
+                    crawled_file_ids.add(item_id)
+                    
+                    if len(buffer_bloque) >= TAMANO_BLOQUE:
+                        guardar_bloque_crawler(f_out)
             
             page_token = response.get('nextPageToken', None)
             if not page_token:
@@ -131,17 +162,65 @@ def recorrer_carpeta(service, folder_id: str, primera_carpeta: Optional[str] = N
             print(f"[-] Ocurrió un error en la API de Drive: {error}")
             break
 
+    # Al terminar la carpeta actual completamente, la agregamos a procesadas
+    processed_folders.add(folder_id)
+
 if __name__ == '__main__':
     try:
-        # ID de la carpeta general en tu Google Drive de donde partirá el flujo
         ID_CARPETA_RAIZ = '1EY6Bm0NXTm85VkVLIC7T4-lilubKDQDV'
         
+        print("============================================================")
+        print("DocUNI v3.0 - Rastreador (Crawler) con Checkpoint y Bloques")
+        print("============================================================")
+        
+        reset = obtener_argumentos_reset()
+        cp = cargar_checkpoint("crawler", reset)
+        
+        if cp:
+            processed_folders = set(cp.get("processed_folders", []))
+            total_archivos = cp.get("total_archivos", 0)
+            print(f"[*] Reanudando crawler desde checkpoint:")
+            print(f"    - Carpetas ya procesadas: {len(processed_folders)}")
+            print(f"    - Archivos previamente rastreados: {total_archivos}")
+            
+            # Truncar archivo de salida a total_archivos (cantidad de registros)
+            truncar_archivo_por_lineas(rutaCrawled, total_archivos)
+            
+            # Cargar ids de archivos rastreados en memoria para evitar duplicados en la reanudación
+            if os.path.exists(rutaCrawled) and total_archivos > 0:
+                with open(rutaCrawled, 'r', encoding='utf-8', errors='ignore') as f:
+                    for _ in range(total_archivos):
+                        line = f.readline()
+                        if not line:
+                            break
+                        try:
+                            reg = json.loads(line.strip())
+                            crawled_file_ids.add(reg["id_drive"])
+                        except Exception:
+                            pass
+                print(f"    - Cargados {len(crawled_file_ids)} IDs únicos en memoria para evitar duplicados.")
+        else:
+            print("[*] Iniciando rastreo completo desde cero...")
+            processed_folders = set()
+            total_archivos = 0
+            # Crear/sobreescribir el archivo a vacío
+            truncar_archivo_por_lineas(rutaCrawled, 0)
+            
         print("[*] Iniciando autenticación OAuth2...")
         drive_service = obtener_servicio_drive()
         
-        print("[*] Conexión establecida. Iniciando escaneo de archivos...")
-        recorrer_carpeta(drive_service, folder_id=ID_CARPETA_RAIZ)
+        print(f"[*] Conexión establecida. Escribiendo resultados en: {rutaCrawled}")
         
-        print("[*] ¡Proceso de indexación completado con éxito!")
+        # Abrimos en modo append de texto
+        with open(rutaCrawled, 'a', encoding='utf-8') as f_out:
+            recorrer_carpeta(drive_service, folder_id=ID_CARPETA_RAIZ, f_out=f_out)
+            # Guardar cualquier remanente en el buffer
+            guardar_bloque_crawler(f_out)
+        
+        print("============================================================")
+        print(f"[*] ¡Proceso de rastreo finalizado con éxito!")
+        print(f"    - Total de archivos indexados: {total_archivos}")
+        print("============================================================")
     except Exception as e:
-        print(f"[-] Error crítico en la ejecución: {e}")
+        print(f"[-] Error crítico en la ejecución del crawler: {e}")
+        sys.exit(1)

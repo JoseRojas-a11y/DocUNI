@@ -4,22 +4,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DocUNI - Buscador de Documentos</title>
+    <title>DocUNI v3.0 - Buscador de Documentos</title>
     <meta name="description"
-        content="Buscador rápido e inteligente de documentos indexados de DocuUNI. Encuentra documentos mediante índice inverso de palabras clave.">
+        content="Motor de búsqueda inteligente DocUNI v3.0 con índice invertido posicional atómico, snippets KWIC y ranking BM25 con bonificación de proximidad.">
     <!-- Google Fonts - Inter -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Lucide Icons CDN -->
     <link rel="icon" type="image/ico" href="../static/favicon.ico" sizes="32x32">
     <script src="https://unpkg.com/lucide@latest"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='1.0.3') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='3.0.0') }}">
 </head>
 
 <body>
     <div class="glass-bg-decor decor-1"></div>
     <div class="glass-bg-decor decor-2"></div>
+    <div class="glass-bg-decor decor-3"></div>
 
     <main class="app-container">
         <!-- Header Section -->
@@ -27,18 +28,19 @@
             <div class="brand-logo">
                 <i data-lucide="binary" class="brand-icon"></i>
                 <h1 class="brand-name">Doc<span>UNI</span></h1>
+                <span class="version-badge">v3.0</span>
             </div>
-            <p class="brand-tagline">Buscador Inteligente de Planchas y Documentos</p>
+            <p class="brand-tagline">Motor de Búsqueda con Índice Invertido Posicional Atómico</p>
         </header>
 
         <!-- Search Bar Section -->
         <section class="search-section">
-            <p class="brand-tagline">Sugerencia: Busca cursos por su código</p>
+            <p class="brand-tagline search-hint">Busca por palabras clave · Los resultados muestran contexto por página</p>
             <form id="search-form" class="search-form-container glass-panel" onsubmit="event.preventDefault();">
                 <div class="search-input-wrapper">
                     <i data-lucide="search" class="search-icon"></i>
                     <input type="text" id="search-input"
-                        placeholder="Ingresa palabras clave (ej. planchas, sistemas)..." autocomplete="off" autofocus>
+                        placeholder="Ingresa palabras clave (ej. sistemas, software, arquitectura)..." autocomplete="off" autofocus>
                     <button type="button" id="clear-button" class="clear-btn" title="Limpiar búsqueda"
                         style="display: none;">
                         <i data-lucide="x"></i>
@@ -54,7 +56,7 @@
         <!-- Stats Bar -->
         <section id="stats-bar" class="stats-bar-container" style="display: none;">
             <div class="stats-content glass-panel">
-                <span id="search-stats-text">Se encontraron 0 documentos en 0.0000 s</span>
+                <span id="search-stats-text">Se encontraron 0 resultados en 0.0000 s</span>
                 <span id="search-terms-tags" class="search-tags-list"></span>
             </div>
         </section>
@@ -64,22 +66,23 @@
             <!-- Loading Indicator -->
             <div id="loading-state" class="status-indicator" style="display: none;">
                 <div class="spinner"></div>
-                <p>Buscando en el índice inverso...</p>
+                <p>Buscando en el índice invertido posicional...</p>
             </div>
 
             <!-- Empty / Initial State -->
             <div id="empty-state" class="status-indicator glass-panel">
                 <i data-lucide="folder-search" class="state-icon"></i>
                 <h2>Comienza tu búsqueda</h2>
-                <p>Escribe una o más palabras para encontrar documentos. Los resultados se ordenarán de forma
-                    inteligente dando prioridad a las coincidencias exactas de todos los términos.</p>
+                <p>Escribe una o más palabras para encontrar documentos. Los resultados muestran
+                    <strong>snippets contextuales</strong> por página con las palabras resaltadas y
+                    enlaces directos al documento en la página exacta.</p>
             </div>
 
             <!-- No Results State -->
             <div id="no-results-state" class="status-indicator glass-panel" style="display: none;">
                 <i data-lucide="info" class="state-icon"></i>
                 <h2>Sin coincidencias</h2>
-                <p>No se encontraron documentos que contengan ninguna de las palabras ingresadas. Intenta con otros
+                <p>No se encontraron páginas que contengan ninguna de las palabras ingresadas. Intenta con otros
                     términos.</p>
             </div>
 
@@ -111,10 +114,10 @@
 
     <!-- Footer -->
     <footer class="app-footer">
-        <p>DocUNI &copy; 2026 &bull; Motor de Búsqueda de Índice Inverso</p>
+        <p>DocUNI v3.0 &copy; 2026 &bull; Índice Invertido Atómico Posicional &bull; BM25 con Proximidad</p>
     </footer>
 
-    <script src="{{ url_for('static', filename='js/main.js', v='1.0.3') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js', v='3.0.0') }}"></script>
 </body>
 
 </html>

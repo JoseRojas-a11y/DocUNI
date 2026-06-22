@@ -3,6 +3,7 @@
 *.json
 *.csv
 *.pyc
+*.zip
 __pycache__/
 
 documentos_data

@@ -197,7 +197,7 @@ $$\text{IDF}(q_i) = \ln \left( \frac{N - n(q_i) + 0.5}{n(q_i) + 0.5} + 1 \right)
 
 ---
 
-#### 📊 Desglose Visual y Equivalencias en el Código
+#### - Desglose Visual y Equivalencias en el Código
 
 A continuación se detalla cada componente de la fórmula y cómo está mapeado en el backend (`aplicativo/app.py`):
 
@@ -268,7 +268,7 @@ erDiagram
 
 ### Detalle Técnico de Tablas (Diccionario de Datos)
 
-#### 📋 Tabla: `documentos_indexados`
+#### - Tabla: `documentos_indexados`
 Esta tabla registra la información de catálogo, metadatos y longitudes de los documentos académicos.
 
 | Campo (Nombre) | Tipo de Variable (PostgreSQL) | Longitud (en bits) | Descripción / Propósito |

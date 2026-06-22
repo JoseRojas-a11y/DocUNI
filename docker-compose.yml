@@ -10,13 +10,10 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: JoSeSiTo%_10
     volumes:
-      # Esquema de la base de datos
+      # Esquema de la base de datos (3 tablas 1NF)
       - ./CREATE_SQL.sql:/docker-entrypoint-initdb.d/1-schema.sql
-      # Script SQL que ejecuta la carga masiva mediante COPY
+      # Script de inicialización (extensible para datos futuros)
       - ./docker-init-data.sql:/docker-entrypoint-initdb.d/2-data.sql
-      # Archivos CSV origen montados en la carpeta de inicialización
-      - ./documentos_data:/docker-entrypoint-initdb.d/documentos_data
-      - ./indice_docu_data:/docker-entrypoint-initdb.d/indice_docu_data
       # Volumen persistente de PostgreSQL
       - pgdata:/var/lib/postgresql/data
     healthcheck:

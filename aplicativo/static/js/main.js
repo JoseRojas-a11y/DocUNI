@@ -1,3 +1,13 @@
+// ============================================================
+// DocUNI v3.0 - Controlador del Lado del Cliente
+// ============================================================
+// Implementa:
+// - Comunicación asíncrona con /api/search
+// - Renderizado de tarjetas con snippets KWIC
+// - Paginación dinámica
+// - Deep links con #page=N
+// ============================================================
+
 // --- Global State Variables ---
 let currentQuery = "";
 let currentPage = 1;
@@ -128,7 +138,7 @@ function displayResults(data) {
 
     // 2. Render Search Statistics
     const statsText = document.getElementById("search-stats-text");
-    statsText.innerHTML = `Se encontraron <strong>${data.total_results}</strong> documento${data.total_results !== 1 ? 's' : ''} en <strong>${data.time_taken}</strong> s &bull; Pág. <strong>${data.page}</strong> de <strong>${data.pages}</strong>`;
+    statsText.innerHTML = `Se encontraron <strong>${data.total_results}</strong> resultado${data.total_results !== 1 ? 's' : ''} en <strong>${data.time_taken}</strong> s &bull; Pág. <strong>${data.page}</strong> de <strong>${data.pages}</strong>`;
     
     // Render search word tags
     const tagsContainer = document.getElementById("search-terms-tags");
@@ -156,11 +166,14 @@ function displayResults(data) {
         const matchLabel = doc.match_type === "all" ? "Coincidencia Total" : "Coincidencia Parcial";
         const matchIcon = doc.match_type === "all" ? "check-circle" : "check";
 
+        // Format the nombre_compuesto for display (replace underscores with readable path)
+        const displayTitle = formatDocumentTitle(doc.nombre_compuesto);
+
         // Build HTML content for the card
         docCard.innerHTML = `
             <div class="doc-card-header">
                 <div class="doc-title-wrapper">
-                    <h3 class="doc-title">${escapeHTML(doc.nombre_original)}</h3>
+                    <h3 class="doc-title">${escapeHTML(displayTitle)}</h3>
                     <div class="doc-subtitle">${escapeHTML(doc.nombre_compuesto)}</div>
                 </div>
                 <span class="match-badge ${matchClass}">
@@ -169,29 +182,33 @@ function displayResults(data) {
                 </span>
             </div>
             
-            <div class="doc-details-row">
-                <div class="detail-item" title="Categoría Principal">
-                    <i data-lucide="tag"></i>
-                    <span>${escapeHTML(doc.categoria_principal || "Sin categoría")}</span>
+            <div class="doc-snippet-section">
+                <div class="snippet-label">
+                    <i data-lucide="file-text" style="width: 14px; height: 14px;"></i>
+                    <span>Página ${doc.numero_pagina}</span>
                 </div>
-                <div class="detail-item" title="Score BM25">
+                <p class="doc-snippet">${doc.snippet || '<em>Sin vista previa disponible</em>'}</p>
+            </div>
+
+            <div class="doc-details-row">
+                <div class="detail-item" title="Score BM25 (con bonificación de proximidad)">
                     <i data-lucide="activity"></i>
                     <span>Score BM25: <strong>${doc.bm25_score}</strong></span>
                 </div>
-                <div class="detail-item" title="ID de Drive">
-                    <i data-lucide="database"></i>
-                    <span>ID: ${escapeHTML(doc.id_drive)}</span>
+                <div class="detail-item" title="Número de página en el documento">
+                    <i data-lucide="bookmark"></i>
+                    <span>Pág. <strong>${doc.numero_pagina}</strong></span>
                 </div>
             </div>
             
             <div class="doc-card-footer">
                 <div class="matched-info">
-                    <span>Palabras coincidentes:</span>
+                    <span>Términos encontrados:</span>
                     <div class="matched-words-container">
                         ${doc.matched_words.map(w => `<span class="matched-word-token">${escapeHTML(w)}</span>`).join('')}
                     </div>
                 </div>
-                <a href="${escapeHTML(doc.url_acceso)}" target="_blank" rel="noopener noreferrer" class="access-link">
+                <a href="${escapeHTML(doc.url_destino)}" target="_blank" rel="noopener noreferrer" class="access-link" id="result-link-${index}">
                     <span>Ver en Drive</span>
                     <i data-lucide="external-link"></i>
                 </a>
@@ -211,6 +228,18 @@ function displayResults(data) {
     
     // Scroll smoothly to top of search area on page change
     document.querySelector(".search-section").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// --- Format Document Title ---
+function formatDocumentTitle(nombreCompuesto) {
+    if (!nombreCompuesto) return "Documento sin título";
+    
+    // Extract the last component (actual filename) from the compound name
+    const parts = nombreCompuesto.split("_");
+    
+    // Try to find the actual filename (last meaningful segment)
+    // Replace underscores with spaces for readability
+    return nombreCompuesto.replace(/_/g, " ");
 }
 
 // --- Render Pagination Buttons Helper ---
