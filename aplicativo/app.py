@@ -29,13 +29,37 @@ from db_config import DB_CONFIG
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
 
+def normalizar_palabra(palabra: str) -> str:
+    """Aplica normalización avanzada a la palabra (tildes, plurales, errores de OCR, y límite de 150 caracteres)."""
+    # 1. Limitar longitud a 150 caracteres
+    if len(palabra) > 150:
+        palabra = palabra[:150]
+
+    # 2. Convertir a minúsculas
+    palabra = palabra.lower()
+
+    # 3. Remover acentos/tildes
+    tildes = {'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u', 'ü': 'u'}
+    for t, r in tildes.items():
+        palabra = palabra.replace(t, r)
+
+    # 4. Corregir errores típicos de OCR (e.g. reunién -> reunion)
+    if palabra.endswith("ien") and len(palabra) > 4:
+        palabra = palabra[:-3] + "ion"
+
+    # 5. Normalizar plurales (eliminar la 's' final en palabras de longitud > 3)
+    if palabra.endswith("s") and len(palabra) > 3:
+        palabra = palabra[:-1]
+
+    return palabra
+
+
 def extraer_palabras(texto: str) -> list[str]:
     """Normaliza y tokeniza el texto: minúsculas + solo alfanuméricos en español."""
     if not texto:
         return []
-    texto_limpio = texto.lower()
-    # Mismo regex de extracción que dataIngestion.py para coincidir con la indexación
-    return re.findall(r'\b[a-záéíóúñ0-9]+\b', texto_limpio)
+    palabras_crudas = re.findall(r'\b[a-záéíóúñ0-9]+\b', texto.lower())
+    return [normalizar_palabra(p) for p in palabras_crudas if p]
 
 @app.route("/")
 def index():

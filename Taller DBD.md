@@ -22,13 +22,13 @@ Almacena la identidad global del archivo.
 |`procesado`|`BOOLEAN`|Bandera para controlar la ingesta concurrente.|
 |`primera_carpeta`|`VARCHAR(70)`|Indica el nombre de la primera carpeta donde se encuentra el archivo|
 
-### 2.2. Tabla: `paginas_documento` (Forward Index / Almacén de Texto)
+### 2.2. Tabla: `lineas_documento` (Forward Index / Almacén de Texto)
 
 Almacena el texto fragmentado para aislar el contexto y permitir la generación de Snippets.
 
 |Columna|Tipo|Descripción|
 |---|---|---|
-|`id_pagina`|`SERIAL`|**Primary Key**. Identificador único del fragmento.|
+|`id_linea`|`SERIAL`|**Primary Key**. Identificador único del fragmento.|
 |`id_drive`|`VARCHAR(100)`|**Foreign Key**. Referencia al documento padre.|
 |`numero_pagina`|`INTEGER`|Número de página real en el archivo físico.|
 |`texto_pagina`|`TEXT`|Texto crudo utilizado para recortes (KWIC).|
@@ -40,10 +40,10 @@ El núcleo del motor. Registra cada token (palabra) individual en su posición e
 |Columna|Tipo|Descripción|
 |---|---|---|
 |`palabra`|`VARCHAR(150)`|**Primary Key (1/3)**. Término limpio y normalizado.|
-|`id_pagina`|`INTEGER`|**Primary Key (2/3)**. **Foreign Key**. Página donde aparece.|
+|`id_linea`|`INTEGER`|**Primary Key (2/3)**. **Foreign Key**. Página donde aparece.|
 |`posicion`|`INTEGER`|**Primary Key (3/3)**. Índice numérico de la palabra en el texto.|
 
-**Nota sobre la Llave Primaria (PK):** La combinación de `(palabra, id_pagina, posicion)` asegura que una misma palabra no pueda registrarse dos veces en la misma posición exacta de la misma página, garantizando la unicidad atómica.
+**Nota sobre la Llave Primaria (PK):** La combinación de `(palabra, id_linea, posicion)` asegura que una misma palabra no pueda registrarse dos veces en la misma posición exacta de la misma página, garantizando la unicidad atómica.
 
 **Índice Crítico de Búsqueda:** Para agilizar la recuperación y las uniones (JOINs), se recomienda crear un índice B-Tree sobre el término:
 
@@ -126,19 +126,19 @@ El backend implementa un enrutamiento inteligente basado en la naturaleza del ar
     
     ```
     INSERT INTO paginas_documento (id_drive, numero_pagina, texto_pagina) 
-    VALUES (%s, %s, %s) RETURNING id_pagina;
+    VALUES (%s, %s, %s) RETURNING id_linea;
     ```
     
 
 ### Fase 3.2. Tokenización y Mapeo Posicional
 
-Para cada `id_pagina` insertado:
+Para cada `id_linea` insertado:
 
 1. El texto se normaliza por completo en Python (conversión a minúsculas, remoción estricta de signos de puntuación y caracteres especiales, preservando caracteres alfanuméricos en español).
     
 2. Se realiza una división por espacios para generar el vector ordenado de tokens (ej. `["arquitectura", "relacional", "pura"]`).
     
-3. Se itera secuencialmente sobre el vector para construir las tuplas estructuradas que capturan la posición exacta: `("arquitectura", id_pagina, 0)`, `("relacional", id_pagina, 1)`, etc.
+3. Se itera secuencialmente sobre el vector para construir las tuplas estructuradas que capturan la posición exacta: `("arquitectura", id_linea, 0)`, `("relacional", id_linea, 1)`, etc.
     
 
 ### Fase 3.3. Inserción Masiva por Lotes (Bulk Insert)
@@ -153,9 +153,9 @@ from psycopg2.extras import execute_values
 
 def guardar_lote_indice(cursor, lote_tuplas_atomicas):
     query_insert = \"\"\"
-        INSERT INTO indice_invertido_uni (palabra, id_pagina, posicion) 
+        INSERT INTO indice_invertido_uni (palabra, id_linea, posicion) 
         VALUES %s 
-        ON CONFLICT (palabra, id_pagina, posicion) DO NOTHING
+        ON CONFLICT (palabra, id_linea, posicion) DO NOTHING
     \"\"\"
     execute_values(cursor, query_insert, lote_tuplas_atomicas)
 ```
@@ -172,12 +172,12 @@ SQL
 
 ```
 SELECT 
-    id_pagina, 
+    id_linea, 
     COUNT(*) AS frecuencia, 
     ARRAY_AGG(posicion ORDER BY posicion) AS lista_posiciones 
 FROM indice_invertido_uni 
 WHERE palabra = 'sistemas' 
-GROUP BY id_pagina;
+GROUP BY id_linea;
 ```
 
 _Justificación Arquitectónica:_ Esto elimina la necesidad de almacenar contadores estáticos o estructuras precalculadas, recalculando el peso contextual basándose estrictamente en las filas existentes en la base de datos.
@@ -189,10 +189,10 @@ Para consultas compuestas por múltiples términos (ej. "sistemas" y "software")
 SQL
 
 ```
-SELECT id_pagina
+SELECT id_linea
 FROM indice_invertido_uni
 WHERE palabra IN ('sistemas', 'software')
-GROUP BY id_pagina
+GROUP BY id_linea
 HAVING COUNT(DISTINCT palabra) = 2;
 ```
 

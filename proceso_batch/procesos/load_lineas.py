@@ -24,7 +24,7 @@ rutaPaginasDoc = os.path.abspath(os.path.join(BASE_DIR, '..', 'archivos_planos',
 sys.path.append(os.path.abspath(os.path.join(BASE_DIR, '..', '..')))
 from db_config import DB_CONFIG
 
-def cargar_paginas(tamano_bloque: int = 1000, reset: bool = None):
+def cargar_lineas(tamano_bloque: int = 1000, reset: bool = None):
     if not os.path.exists(rutaPaginasDoc):
         print(f"[-] No se encontró {rutaPaginasDoc}. Salteando carga de páginas.")
         return 0
@@ -55,7 +55,7 @@ def cargar_paginas(tamano_bloque: int = 1000, reset: bool = None):
     bloque = []
     
     query = """
-        INSERT INTO paginas_documento (id_drive, numero_fila, texto_fila)
+        INSERT INTO lineas_documento (id_drive, numero_fila, texto_fila)
         VALUES %s
         ON CONFLICT (id_drive, numero_fila) DO UPDATE 
         SET texto_fila = EXCLUDED.texto_fila;
@@ -126,4 +126,4 @@ def cargar_paginas(tamano_bloque: int = 1000, reset: bool = None):
     return total_cargados
 
 if __name__ == '__main__':
-    cargar_paginas()
+    cargar_lineas()

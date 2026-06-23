@@ -124,52 +124,17 @@ def cargar_indice(tamano_bloque: int = 50000, reset: bool = None):
     return total_cargados
 
 def procesar_y_cargar_bloque(cursor, conn, bloque) -> int:
-    """Resuelve id_pagina para cada token en el bloque y los inserta en la base de datos."""
+    """Inserta los tokens directamente en la base de datos ya mapeados."""
     if not bloque:
         return 0
 
-    # Extraer combinaciones únicas de (id_drive, numero_pagina) en el bloque
-    unique_pairs = list(set((item["d"], item["n"]) for item in bloque))
-    
-    mapping = {}
-    
-    # Consultar id_pagina en sub-lotes de 5,000 para evitar desbordar límites de placeholders
-    SUB_BATCH_SIZE = 5000
-    for i in range(0, len(unique_pairs), SUB_BATCH_SIZE):
-        sub_list = unique_pairs[i:i+SUB_BATCH_SIZE]
-        
-        cursor.execute(
-            """
-            SELECT id_pagina, id_drive, numero_pagina 
-            FROM paginas_documento 
-            WHERE (id_drive, numero_pagina) IN %s
-            """,
-            (tuple(sub_list),)
-        )
-        
-        for id_pag, id_dr, num_pag in cursor.fetchall():
-            mapping[(id_dr, num_pag)] = id_pag
-
-    # Mapear tokens a las llaves foráneas reales de base de datos
     insert_rows = []
-    mismatch_count = 0
-    
     for item in bloque:
-        key = (item["d"], item["n"])
-        if key in mapping:
-            insert_rows.append((
-                item["p"],
-                mapping[key],
-                item["pos"]
-            ))
-        else:
-            mismatch_count += 1
-
-    if mismatch_count > 0:
-        print(f"    [!] Advertencia: {mismatch_count} tokens no pudieron mapearse a una página existente en la BD.")
-
-    if not insert_rows:
-        return 0
+        insert_rows.append((
+            item["palabra"],
+            item["id_linea"],
+            item["posicion"]
+        ))
 
     # Bulk Insert con ON CONFLICT para evitar fallas por duplicados
     query = """

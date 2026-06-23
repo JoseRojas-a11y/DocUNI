@@ -11,7 +11,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 from checkpoint_utils import obtener_argumentos_reset
 from load_documentos import cargar_documentos
-from load_paginas import cargar_paginas
+from load_lineas import cargar_lineas
 from load_indice import cargar_indice
 
 def main():
@@ -33,7 +33,7 @@ def main():
     
     # 2. Cargar páginas
     t_pags = time.time()
-    pags_cargadas = cargar_paginas(reset=reset)
+    pags_cargadas = cargar_lineas(reset=reset)
     d_pags = time.time() - t_pags
     print(f"[OK] Carga de páginas finalizada en {d_pags:.2f}s.\n")
     

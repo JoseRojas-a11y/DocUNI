@@ -18,16 +18,41 @@ from checkpoint_utils import cargar_checkpoint, guardar_checkpoint, truncar_arch
 # Rutas resueltas de manera absoluta respecto a la ubicación de este script
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 rutaPaginasDoc = os.path.abspath(os.path.join(BASE_DIR, '..', 'archivos_planos', 'paginas_documento.jsonl'))
-rutaIndiceUni = os.path.abspath(os.path.join(BASE_DIR, '..', 'archivos_planos', 'indice_invertido_uni.jsonl'))
+rutaIndiceUniTemp = os.path.abspath(os.path.join(BASE_DIR, '..', 'archivos_planos', 'indice_invertido_uni_temp.jsonl'))
 
-TAMANO_BLOQUE = 500  # Procesar de a 500 páginas por bloque
+TAMANO_BLOQUE = 50000  # Procesar de a 50000 lineas por bloque
+
+def normalizar_palabra(palabra: str) -> str:
+    """Aplica normalización avanzada a la palabra (tildes, plurales, errores de OCR, y límite de 150 caracteres)."""
+    # 1. Limitar longitud a 150 caracteres
+    if len(palabra) > 150:
+        palabra = palabra[:150]
+
+    # 2. Convertir a minúsculas
+    palabra = palabra.lower()
+
+    # 3. Remover acentos/tildes
+    tildes = {'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u', 'ü': 'u'}
+    for t, r in tildes.items():
+        palabra = palabra.replace(t, r)
+
+    # 4. Corregir errores típicos de OCR (e.g. reunién -> reunion)
+    if palabra.endswith("ien") and len(palabra) > 4:
+        palabra = palabra[:-3] + "ion"
+
+    # 5. Normalizar plurales (eliminar la 's' final en palabras de longitud > 3)
+    if palabra.endswith("s") and len(palabra) > 3:
+        palabra = palabra[:-1]
+
+    return palabra
+
 
 def extraer_palabras(texto: str) -> list[str]:
     """Normaliza y tokeniza el texto: minúsculas + solo alfanuméricos en español."""
     if not texto:
         return []
-    texto_limpio = texto.lower()
-    return re.findall(r'\b[a-záéíóúñ0-9]+\b', texto_limpio)
+    palabras_crudas = re.findall(r'\b[a-záéíóúñ0-9]+\b', texto.lower())
+    return [normalizar_palabra(p) for p in palabras_crudas if p]
 
 def tokenizar_y_posicionar(texto: str) -> list[tuple]:
     """Normaliza y extrae las palabras y sus posiciones."""
@@ -40,33 +65,18 @@ def tokenizar_y_posicionar(texto: str) -> list[tuple]:
             tuplas.append((palabra, posicion))
     return tuplas
 
-def leer_bloque_paginas(f_in, tamano_bloque: int) -> list[dict]:
-    """Lee un bloque de páginas del archivo de entrada y las parsea de JSON."""
-    lineas = []
-    for _ in range(tamano_bloque):
-        linea = f_in.readline()
-        if not linea:
-            break
-        linea_str = linea.strip()
-        if linea_str:
-            try:
-                lineas.append(json.loads(linea_str))
-            except Exception as e:
-                print(f"[-] Error parseando línea de página: {e}")
-    return lineas
-
 def construir_indice():
     if not os.path.exists(rutaPaginasDoc):
         print(f"[-] No se encontró {rutaPaginasDoc}. Ejecuta dataIngestion.py primero.")
         return
 
     print("============================================================")
-    print("DocUNI v3.0 - Index Maker con Checkpoint y Bloques")
+    print("DocUNI v3.0 - Index Maker (Generación de Fichas Temporales)")
     print("============================================================")
     print(f"[*] Leyendo filas de documentos desde: {rutaPaginasDoc}")
-    print(f"[*] Escribiendo índice invertido en: {rutaIndiceUni}")
+    print(f"[*] Escribiendo índice temporal en: {rutaIndiceUniTemp}")
     
-    os.makedirs(os.path.dirname(rutaIndiceUni), exist_ok=True)
+    os.makedirs(os.path.dirname(rutaIndiceUniTemp), exist_ok=True)
     
     reset = obtener_argumentos_reset()
     cp = cargar_checkpoint("indexMaker", reset)
@@ -90,10 +100,10 @@ def construir_indice():
         print(f"    - Tokens indexados previamente: {total_tokens}")
         
         # Truncar archivo de salida por cantidad de registros
-        truncar_archivo_por_lineas(rutaIndiceUni, lineas_escritas_indice)
+        truncar_archivo_por_lineas(rutaIndiceUniTemp, lineas_escritas_indice)
     else:
         print("[*] Iniciando indexador desde cero...")
-        truncar_archivo_por_lineas(rutaIndiceUni, 0)
+        truncar_archivo_por_lineas(rutaIndiceUniTemp, 0)
         
     t_inicio = time.time()
     
@@ -104,7 +114,7 @@ def construir_indice():
 
     generator = iterar_lineas_archivos_rotados(rutaPaginasDoc, lineas_leidas_entrada)
 
-    with open(rutaIndiceUni, 'a', encoding='utf-8') as f_out:
+    with open(rutaIndiceUniTemp, 'a', encoding='utf-8') as f_out:
         while True:
             bloque = []
             for _ in range(TAMANO_BLOQUE):
@@ -121,22 +131,21 @@ def construir_indice():
             if not bloque:
                 break
                 
+            inicio_bloque_id = lineas_leidas_entrada + 1
             lineas_leidas_entrada += len(bloque)
             tokens_bloque = []
             
-            for pag in bloque:
+            for idx_pag, pag in enumerate(bloque):
                 try:
-                    id_drive = pag["id_drive"]
-                    numero_fila = pag["numero_fila"]
+                    id_linea = inicio_bloque_id + idx_pag
                     texto_fila = pag["texto_fila"]
                     
                     tokens_pos = tokenizar_y_posicionar(texto_fila)
                     for palabra, posicion in tokens_pos:
                         tok_data = {
-                            "p": palabra,
-                            "d": id_drive,
-                            "n": numero_fila,
-                            "pos": posicion
+                            "palabra": palabra,
+                            "id_linea": id_linea,
+                            "posicion": posicion
                         }
                         tokens_bloque.append(tok_data)
                     total_filas += 1
@@ -170,7 +179,7 @@ def construir_indice():
             
     duracion = time.time() - t_inicio
     print("============================================================")
-    print(f"[*] ¡Generación de índice inverso finalizada en {duracion:.2f}s!")
+    print(f"[*] ¡Generación de índice temporal finalizada en {duracion:.2f}s!")
     print(f"  - Total de filas procesadas: {total_filas}")
     print(f"  - Total de tokens indexados:   {total_tokens}")
     print("============================================================")
