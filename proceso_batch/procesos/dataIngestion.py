@@ -48,6 +48,115 @@ rutaDocIndexados = os.path.abspath(os.path.join(BASE_DIR, '..', 'archivos_planos
 rutaPaginasDoc = os.path.abspath(os.path.join(BASE_DIR, '..', 'archivos_planos', 'paginas_documento.jsonl'))
 rutaIndiceUni = os.path.abspath(os.path.join(BASE_DIR, '..', 'archivos_planos', 'indice_invertido_uni.jsonl'))
 
+# Límite de líneas por archivo plano para rotación
+LIMITE_LINEAS_ROTACION = 500000
+
+def obtener_ruta_con_correlativo(ruta_base: str, index: int) -> str:
+    """
+    Retorna la ruta con el correlativo si index > 1, de lo contrario la ruta base.
+    Ejemplo: documentos_indexados.jsonl, documentos_indexados_2.jsonl, etc.
+    """
+    if index <= 1:
+        return ruta_base
+    nombre, ext = os.path.splitext(ruta_base)
+    return f"{nombre}_{index}{ext}"
+
+def truncar_archivos_rotados(ruta_base: str, total_lineas_a_mantener: int, limite_lineas: int = LIMITE_LINEAS_ROTACION):
+    """
+    Trunca archivos planos rotados para mantener únicamente total_lineas_a_mantener registros en total.
+    """
+    if total_lineas_a_mantener is None:
+        return
+
+    # Determinar el último archivo que debe contener datos y su remanente
+    ultimo_indice_valido = (total_lineas_a_mantener // limite_lineas) + 1
+    remanente_ultimo_archivo = total_lineas_a_mantener % limite_lineas
+
+    if total_lineas_a_mantener > 0 and remanente_ultimo_archivo == 0:
+        ultimo_indice_valido -= 1
+        remanente_ultimo_archivo = limite_lineas
+
+    # 1. Truncar los archivos que deben estar completos (1,000,000 líneas)
+    for i in range(1, ultimo_indice_valido):
+        ruta = obtener_ruta_con_correlativo(ruta_base, i)
+        truncar_archivo_por_lineas(ruta, limite_lineas)
+
+    # 2. Truncar el último archivo al remanente
+    ruta_ultimo = obtener_ruta_con_correlativo(ruta_base, ultimo_indice_valido)
+    truncar_archivo_por_lineas(ruta_ultimo, remanente_ultimo_archivo)
+
+    # 3. Eliminar archivos posteriores
+    i = ultimo_indice_valido + 1
+    while True:
+        ruta_siguiente = obtener_ruta_con_correlativo(ruta_base, i)
+        if os.path.exists(ruta_siguiente):
+            try:
+                os.remove(ruta_siguiente)
+                print(f"[+] Archivo rotado sobrante eliminado: {os.path.basename(ruta_siguiente)}")
+            except Exception as e:
+                print(f"[-] No se pudo eliminar el archivo rotado sobrante {ruta_siguiente}: {e}")
+            i += 1
+        else:
+            break
+
+def iterar_lineas_archivos_rotados(ruta_base: str, lineas_a_saltar: int = 0):
+    """
+    Generador que lee secuencialmente las líneas de todos los archivos rotados existentes,
+    saltando las primeras `lineas_a_saltar` líneas.
+    """
+    lineas_saltadas = 0
+    indice_archivo = 1
+
+    while True:
+        ruta = obtener_ruta_con_correlativo(ruta_base, indice_archivo)
+        if not os.path.exists(ruta):
+            break
+
+        with open(ruta, 'r', encoding='utf-8') as f:
+            for linea in f:
+                if lineas_saltadas < lineas_a_saltar:
+                    lineas_saltadas += 1
+                    continue
+                yield linea
+        indice_archivo += 1
+
+class RotadorArchivo:
+    """
+    Administra la escritura secuencial de líneas en archivos planos
+    rotando el archivo cuando supera el límite de líneas.
+    """
+    def __init__(self, ruta_base: str, lineas_escritas_iniciales: int, limite_lineas: int = LIMITE_LINEAS_ROTACION):
+        self.ruta_base = ruta_base
+        self.total_escritas = lineas_escritas_iniciales
+        self.limite_lineas = limite_lineas
+        self.archivo_actual = None
+        self.indice_actual = None
+
+    def escribir_linea(self, contenido: str):
+        # Determinar el índice correspondiente a la línea actual
+        nuevo_indice = (self.total_escritas // self.limite_lineas) + 1
+
+        if self.indice_actual != nuevo_indice:
+            if self.archivo_actual:
+                self.archivo_actual.close()
+            ruta = obtener_ruta_con_correlativo(self.ruta_base, nuevo_indice)
+            os.makedirs(os.path.dirname(ruta), exist_ok=True)
+            self.archivo_actual = open(ruta, 'a', encoding='utf-8')
+            self.indice_actual = nuevo_indice
+
+        self.archivo_actual.write(contenido)
+        self.total_escritas += 1
+
+    def flush(self):
+        if self.archivo_actual:
+            self.archivo_actual.flush()
+
+    def close(self):
+        if self.archivo_actual:
+            self.archivo_actual.close()
+            self.archivo_actual = None
+            self.indice_actual = None
+
 # Importación diferida del módulo OCR (solo se carga si se necesita)
 ocr_engine = None
 
@@ -381,12 +490,12 @@ def motor_ingesta_uni():
         print(f"    - Documentos diferidos para OCR: {len(documentos_para_ocr)} (Procesados: {ocr_procesados_index})")
         
         # Truncar archivos de salida por cantidad de registros
-        truncar_archivo_por_lineas(rutaDocIndexados, lineas_escritas_docs)
-        truncar_archivo_por_lineas(rutaPaginasDoc, lineas_escritas_pags)
+        truncar_archivos_rotados(rutaDocIndexados, lineas_escritas_docs)
+        truncar_archivos_rotados(rutaPaginasDoc, lineas_escritas_pags)
     else:
         print("[*] Iniciando ingesta desde cero...")
-        truncar_archivo_por_lineas(rutaDocIndexados, 0)
-        truncar_archivo_por_lineas(rutaPaginasDoc, 0)
+        truncar_archivos_rotados(rutaDocIndexados, 0)
+        truncar_archivos_rotados(rutaPaginasDoc, 0)
 
     creds = obtener_credenciales()
 
@@ -396,6 +505,9 @@ def motor_ingesta_uni():
     TAMANO_BLOQUE = 10
     MAX_HILOS = 10
     t_inicio = time.time()
+
+    rotador_docs = RotadorArchivo(rutaDocIndexados, lineas_escritas_docs)
+    rotador_pags = RotadorArchivo(rutaPaginasDoc, lineas_escritas_pags)
 
     # FASE 1: Procesamiento con Tika
     if fase == "tika":
@@ -445,46 +557,43 @@ def motor_ingesta_uni():
                 nuevos_docs = 0
                 nuevas_pags = 0
                 
-                with open(rutaDocIndexados, 'a', encoding='utf-8') as f_docs, \
-                     open(rutaPaginasDoc, 'a', encoding='utf-8') as f_pags:
-                    
-                    for res in resultados:
-                        if not res.get("success"):
-                            if res.get("necesita_ocr"):
-                                print(f"    [Tika Fallido] Se difiere a OCR: {res['doc']['nombre_compuesto']} -> {res.get('error')}")
-                                documentos_para_ocr.append(res["doc"])
-                            else:
-                                print(f"    [-] Error en: {res.get('nombre_compuesto')} -> {res.get('error')}")
-                                total_fallidos += 1
-                            continue
+                for res in resultados:
+                    if not res.get("success"):
+                        if res.get("necesita_ocr"):
+                            print(f"    [Tika Fallido] Se difiere a OCR: {res['doc']['nombre_compuesto']} -> {res.get('error')}")
+                            documentos_para_ocr.append(res["doc"])
+                        else:
+                            print(f"    [-] Error en: {res.get('nombre_compuesto')} -> {res.get('error')}")
+                            total_fallidos += 1
+                        continue
 
-                        id_drive = res["id_drive"]
-                        nombre_compuesto = res["nombre_compuesto"]
-                        url_acceso = res["url_acceso"]
+                    id_drive = res["id_drive"]
+                    nombre_compuesto = res["nombre_compuesto"]
+                    url_acceso = res["url_acceso"]
 
-                        doc_meta = {
+                    doc_meta = {
+                        "id_drive": id_drive,
+                        "nombre_compuesto": nombre_compuesto,
+                        "url_acceso": url_acceso,
+                        "primera_carpeta": res.get("primera_carpeta")
+                    }
+                    rotador_docs.escribir_linea(json.dumps(doc_meta, ensure_ascii=False) + '\n')
+                    nuevos_docs += 1
+
+                    for fila in res["filas"]:
+                        fila_data = {
                             "id_drive": id_drive,
-                            "nombre_compuesto": nombre_compuesto,
-                            "url_acceso": url_acceso,
-                            "primera_carpeta": res.get("primera_carpeta")
+                            "numero_fila": fila["numero_fila"],
+                            "texto_fila": fila["texto_fila"]
                         }
-                        f_docs.write(json.dumps(doc_meta, ensure_ascii=False) + '\n')
-                        nuevos_docs += 1
+                        rotador_pags.escribir_linea(json.dumps(fila_data, ensure_ascii=False) + '\n')
+                        nuevas_pags += 1
 
-                        for fila in res["filas"]:
-                            fila_data = {
-                                "id_drive": id_drive,
-                                "numero_fila": fila["numero_fila"],
-                                "texto_fila": fila["texto_fila"]
-                            }
-                            f_pags.write(json.dumps(fila_data, ensure_ascii=False) + '\n')
-                            nuevas_pags += 1
-
-                        total_procesados += 1
-                        print(f"    [+] {nombre_compuesto} ({res['ruta_extraccion']}) → {len(res['filas'])} filas.")
-                    
-                    f_docs.flush()
-                    f_pags.flush()
+                    total_procesados += 1
+                    print(f"    [+] {nombre_compuesto} ({res['ruta_extraccion']}) → {len(res['filas'])} filas.")
+                
+                rotador_docs.flush()
+                rotador_pags.flush()
 
                 # Guardar el checkpoint exitoso al finalizar el bloque actual
                 ultimo_bloque += 1
@@ -586,42 +695,39 @@ def motor_ingesta_uni():
                 nuevos_docs = 0
                 nuevas_pags = 0
                 
-                with open(rutaDocIndexados, 'a', encoding='utf-8') as f_docs, \
-                     open(rutaPaginasDoc, 'a', encoding='utf-8') as f_pags:
-                    
-                    for res in resultados:
-                        if not res.get("success"):
-                            print(f"    [-] Error en OCR: {res.get('nombre_compuesto')} -> {res.get('error')}")
-                            total_fallidos += 1
-                            continue
+                for res in resultados:
+                    if not res.get("success"):
+                        print(f"    [-] Error en OCR: {res.get('nombre_compuesto')} -> {res.get('error')}")
+                        total_fallidos += 1
+                        continue
 
-                        id_drive = res["id_drive"]
-                        nombre_compuesto = res["nombre_compuesto"]
-                        url_acceso = res["url_acceso"]
+                    id_drive = res["id_drive"]
+                    nombre_compuesto = res["nombre_compuesto"]
+                    url_acceso = res["url_acceso"]
 
-                        doc_meta = {
+                    doc_meta = {
+                        "id_drive": id_drive,
+                        "nombre_compuesto": nombre_compuesto,
+                        "url_acceso": url_acceso,
+                        "primera_carpeta": res.get("primera_carpeta")
+                    }
+                    rotador_docs.escribir_linea(json.dumps(doc_meta, ensure_ascii=False) + '\n')
+                    nuevos_docs += 1
+
+                    for fila in res["filas"]:
+                        fila_data = {
                             "id_drive": id_drive,
-                            "nombre_compuesto": nombre_compuesto,
-                            "url_acceso": url_acceso,
-                            "primera_carpeta": res.get("primera_carpeta")
+                            "numero_fila": fila["numero_fila"],
+                            "texto_fila": fila["texto_fila"]
                         }
-                        f_docs.write(json.dumps(doc_meta, ensure_ascii=False) + '\n')
-                        nuevos_docs += 1
+                        rotador_pags.escribir_linea(json.dumps(fila_data, ensure_ascii=False) + '\n')
+                        nuevas_pags += 1
 
-                        for fila in res["filas"]:
-                            fila_data = {
-                                "id_drive": id_drive,
-                                "numero_fila": fila["numero_fila"],
-                                "texto_fila": fila["texto_fila"]
-                            }
-                            f_pags.write(json.dumps(fila_data, ensure_ascii=False) + '\n')
-                            nuevas_pags += 1
-
-                        total_procesados += 1
-                        print(f"    [+] {nombre_compuesto} ({res['ruta_extraccion']}) → {len(res['filas'])} filas.")
-                    
-                    f_docs.flush()
-                    f_pags.flush()
+                    total_procesados += 1
+                    print(f"    [+] {nombre_compuesto} ({res['ruta_extraccion']}) → {len(res['filas'])} filas.")
+                
+                rotador_docs.flush()
+                rotador_pags.flush()
 
                 # Guardar el checkpoint exitoso al finalizar el bloque actual de OCR
                 ocr_procesados_index += len(bloque_ocr)
@@ -651,6 +757,9 @@ def motor_ingesta_uni():
     print(f"\n[*] Ingesta terminada en {duracion:.2f}s.")
     print(f"    -> Procesados exitosamente: {total_procesados}")
     print(f"    -> Fallidos: {total_fallidos}")
+    
+    rotador_docs.close()
+    rotador_pags.close()
 
 
 if __name__ == '__main__':

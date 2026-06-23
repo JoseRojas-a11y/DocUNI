@@ -97,16 +97,27 @@ def construir_indice():
         
     t_inicio = time.time()
     
-    with open(rutaPaginasDoc, 'r', encoding='utf-8') as f_in, \
-         open(rutaIndiceUni, 'a', encoding='utf-8') as f_out:
-        
-        # Saltar las filas ya procesadas
-        for _ in range(lineas_leidas_entrada):
-            if not f_in.readline():
-                break
-            
+    try:
+        from proceso_batch.procesos.dataIngestion import iterar_lineas_archivos_rotados
+    except ImportError:
+        from dataIngestion import iterar_lineas_archivos_rotados
+
+    generator = iterar_lineas_archivos_rotados(rutaPaginasDoc, lineas_leidas_entrada)
+
+    with open(rutaIndiceUni, 'a', encoding='utf-8') as f_out:
         while True:
-            bloque = leer_bloque_paginas(f_in, TAMANO_BLOQUE)
+            bloque = []
+            for _ in range(TAMANO_BLOQUE):
+                try:
+                    linea = next(generator)
+                    linea_str = linea.strip()
+                    if linea_str:
+                        bloque.append(json.loads(linea_str))
+                except StopIteration:
+                    break
+                except Exception as e:
+                    print(f"[-] Error parseando línea de página: {e}")
+
             if not bloque:
                 break
                 

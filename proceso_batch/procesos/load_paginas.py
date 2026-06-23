@@ -62,46 +62,41 @@ def cargar_paginas(tamano_bloque: int = 1000, reset: bool = None):
     """
     
     try:
-        with open(rutaPaginasDoc, 'r', encoding='utf-8') as f:
-            # Saltar líneas ya procesadas
-            for _ in range(lineas_leidas_entrada):
-                if not f.readline():
-                    break
+        try:
+            from proceso_batch.procesos.dataIngestion import iterar_lineas_archivos_rotados
+        except ImportError:
+            from dataIngestion import iterar_lineas_archivos_rotados
+
+        for linea in iterar_lineas_archivos_rotados(rutaPaginasDoc, lineas_leidas_entrada):
+            linea_str = linea.strip()
+            if not linea_str:
+                continue
+            
+            try:
+                data = json.loads(linea_str)
+                bloque.append((
+                    data["id_drive"],
+                    data["numero_fila"],
+                    data["texto_fila"]
+                ))
+            except Exception as e:
+                print(f"[-] Error parseando línea en load_paginas: {e}")
                 
-            while True:
-                linea = f.readline()
-                if not linea:
-                    break
+            if len(bloque) >= tamano_bloque:
+                psycopg2.extras.execute_values(cursor, query, bloque)
+                conn.commit()
+                total_cargados += len(bloque)
+                lineas_leidas_entrada += len(bloque)
+                ultimo_bloque += 1
+                print(f"    [+] Bloque {ultimo_bloque} cargado. Total acumulado: {total_cargados} filas...")
                 
-                linea_str = linea.strip()
-                if not linea_str:
-                    continue
-                
-                try:
-                    data = json.loads(linea_str)
-                    bloque.append((
-                        data["id_drive"],
-                        data["numero_fila"],
-                        data["texto_fila"]
-                    ))
-                except Exception as e:
-                    print(f"[-] Error parseando línea en load_paginas: {e}")
-                    
-                if len(bloque) >= tamano_bloque:
-                    psycopg2.extras.execute_values(cursor, query, bloque)
-                    conn.commit()
-                    total_cargados += len(bloque)
-                    lineas_leidas_entrada += len(bloque)
-                    ultimo_bloque += 1
-                    print(f"    [+] Bloque {ultimo_bloque} cargado. Total acumulado: {total_cargados} filas...")
-                    
-                    # Guardar checkpoint
-                    guardar_checkpoint("load_paginas", {
-                        "ultimo_bloque": ultimo_bloque,
-                        "lineas_leidas_entrada": lineas_leidas_entrada,
-                        "total_cargados": total_cargados
-                    })
-                    bloque.clear()
+                # Guardar checkpoint
+                guardar_checkpoint("load_paginas", {
+                    "ultimo_bloque": ultimo_bloque,
+                    "lineas_leidas_entrada": lineas_leidas_entrada,
+                    "total_cargados": total_cargados
+                })
+                bloque.clear()
             
             # Cargar remanente
             if bloque:
