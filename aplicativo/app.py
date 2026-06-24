@@ -24,6 +24,10 @@ def add_header(response):
     response.headers["Expires"] = "0"
     return response
 
+import os
+import sys
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.abspath(os.path.join(BASE_DIR, '..')))
 from db_config import DB_CONFIG
 
 def get_db_connection():
