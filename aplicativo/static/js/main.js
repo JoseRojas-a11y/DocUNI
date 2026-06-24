@@ -185,7 +185,7 @@ function displayResults(data) {
             <div class="doc-snippet-section">
                 <div class="snippet-label">
                     <i data-lucide="file-text" style="width: 14px; height: 14px;"></i>
-                    <span>Página ${doc.numero_pagina}</span>
+                    <span>Línea ${doc.numero_linea}</span>
                 </div>
                 <p class="doc-snippet">${doc.snippet || '<em>Sin vista previa disponible</em>'}</p>
             </div>
@@ -195,9 +195,9 @@ function displayResults(data) {
                     <i data-lucide="activity"></i>
                     <span>Score BM25: <strong>${doc.bm25_score}</strong></span>
                 </div>
-                <div class="detail-item" title="Número de página en el documento">
+                <div class="detail-item" title="Número de línea en el documento">
                     <i data-lucide="bookmark"></i>
-                    <span>Pág. <strong>${doc.numero_pagina}</strong></span>
+                    <span>Línea <strong>${doc.numero_linea}</strong></span>
                 </div>
             </div>
             

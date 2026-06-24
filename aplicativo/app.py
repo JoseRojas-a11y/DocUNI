@@ -65,6 +65,94 @@ def extraer_palabras(texto: str) -> list[str]:
 def index():
     return render_template("index.html")
 
+N_CACHE = None
+AVGDL_CACHE = None
+
+def get_corpus_stats(cursor):
+    global N_CACHE, AVGDL_CACHE
+    if N_CACHE is None or AVGDL_CACHE is None:
+        cursor.execute("SELECT COUNT(*) FROM lineas_documento;")
+        N_CACHE = cursor.fetchone()[0] or 1
+        cursor.execute("SELECT COUNT(*) FROM indice_invertido_uni;")
+        total_tokens = cursor.fetchone()[0] or 0
+        AVGDL_CACHE = float(total_tokens) / float(N_CACHE) if N_CACHE > 0 else 1.0
+    return N_CACHE, AVGDL_CACHE
+
+def calcular_menor_distancia(posiciones_por_palabra: dict, palabras: list[str]) -> int:
+    """
+    Calcula la distancia absoluta mínima que separa a las palabras de la consulta 
+    en la línea actual utilizando sus arreglos de posiciones.
+    """
+    if len(palabras) < 2:
+        return 0
+        
+    import itertools
+    posiciones_listas = [posiciones_por_palabra.get(p, []) for p in palabras]
+    
+    if any(not lst for lst in posiciones_listas):
+        return 99999
+        
+    min_span = float('inf')
+    for combo in itertools.product(*posiciones_listas):
+        span = max(combo) - min(combo)
+        if span < min_span:
+            min_span = span
+            
+    distancia = min_span - (len(palabras) - 1)
+    return int(distancia)
+
+def generar_snippet_kwic(texto_linea: str, posiciones_por_palabra: dict) -> str:
+    """
+    Genera un fragmento de texto al estilo Google (KWIC):
+    - Extrae las posiciones reales mapeándolas con re.finditer.
+    - Recorta para mostrar un máximo de 8 palabras antes de la primera coincidencia 
+      y 8 palabras después de la última coincidencia en la línea.
+    - Envuelve los términos de búsqueda con etiquetas HTML <b>palabra</b>.
+    """
+    matches = list(re.finditer(r'\b[a-záéíóúñ0-9]+\b', texto_linea, re.IGNORECASE))
+    if not matches:
+        return texto_linea
+        
+    matched_token_indices = []
+    for pos_lista in posiciones_por_palabra.values():
+        matched_token_indices.extend(pos_lista)
+        
+    if not matched_token_indices:
+        return texto_linea
+        
+    min_token_idx = max(0, min(matched_token_indices))
+    max_token_idx = min(len(matches) - 1, max(matched_token_indices))
+    
+    start_token_idx = max(0, min_token_idx - 8)
+    end_token_idx = min(len(matches) - 1, max_token_idx + 8)
+    
+    start_char = matches[start_token_idx].start()
+    end_char = matches[end_token_idx].end()
+    
+    snippet_raw = texto_linea[start_char:end_char]
+    
+    highlight_ranges = []
+    for pos in matched_token_indices:
+        if 0 <= pos < len(matches):
+            m = matches[pos]
+            highlight_ranges.append((m.start() - start_char, m.end() - start_char))
+            
+    highlight_ranges.sort(key=lambda r: r[0], reverse=True)
+    
+    snippet_chars = list(snippet_raw)
+    for start, end in highlight_ranges:
+        snippet_chars.insert(end, "</b>")
+        snippet_chars.insert(start, "<b>")
+        
+    snippet = "".join(snippet_chars)
+    
+    if start_char > 0:
+        snippet = "..." + snippet
+    if end_char < len(texto_linea):
+        snippet = snippet + "..."
+        
+    return snippet
+
 @app.route("/api/search")
 def search():
     start_time = time.time()
@@ -78,7 +166,6 @@ def search():
         page = 1
 
     palabras = extraer_palabras(query_str)
-    # Evitar duplicados en las palabras buscadas
     palabras = list(set(palabras))
 
     if not palabras:
@@ -98,46 +185,48 @@ def search():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # ============================================================
-        # PASO 1: Consulta al índice atómico - Cálculo de TF y posiciones
-        # ============================================================
-        # Para cada palabra buscada, obtenemos las páginas donde aparece,
-        # la frecuencia (COUNT) y las posiciones exactas (ARRAY_AGG)
-        tf_data = {}  # { palabra: { id_pagina: { "frecuencia": N, "posiciones": [...] } } }
+        N, avgdl = get_corpus_stats(cursor)
 
-        for palabra in palabras:
-            cursor.execute("""
+        cursor.execute("""
+            SELECT palabra, COUNT(DISTINCT id_linea) 
+            FROM indice_invertido_uni 
+            WHERE palabra = ANY(%s) 
+            GROUP BY palabra;
+        """, (palabras,))
+        df_dict = {row[0]: row[1] for row in cursor.fetchall()}
+        for p in palabras:
+            if p not in df_dict:
+                df_dict[p] = 0
+
+        query = """
+            SELECT 
+                i.id_linea,
+                l.id_drive,
+                l.numero_fila AS numero_linea,
+                l.texto_fila AS texto_linea,
+                d.nombre_compuesto,
+                d.url_acceso,
+                COUNT(r.posicion) AS frecuencia_total,
+                jsonb_object_agg(i.palabra, i.posiciones) AS posiciones_por_palabra
+            FROM (
                 SELECT 
-                    id_pagina, 
-                    COUNT(*) AS frecuencia, 
-                    ARRAY_AGG(posicion ORDER BY posicion) AS lista_posiciones 
-                FROM indice_invertido_uni 
-                WHERE palabra = %s 
-                GROUP BY id_pagina;
-            """, (palabra,))
-            rows = cursor.fetchall()
-            tf_data[palabra] = {}
-            for row in rows:
-                tf_data[palabra][row[0]] = {
-                    "frecuencia": row[1],
-                    "posiciones": row[2]
-                }
+                    id_linea, 
+                    palabra, 
+                    array_agg(posicion ORDER BY posicion) AS posiciones
+                FROM indice_invertido_uni
+                WHERE palabra = ANY(%s)
+                GROUP BY id_linea, palabra
+            ) i
+            JOIN indice_invertido_uni r ON r.id_linea = i.id_linea AND r.palabra = i.palabra
+            JOIN lineas_documento l ON i.id_linea = l.id_linea
+            JOIN documentos_indexados d ON l.id_drive = d.id_drive
+            GROUP BY i.id_linea, l.id_drive, l.numero_fila, l.texto_fila, d.nombre_compuesto, d.url_acceso
+            HAVING COUNT(DISTINCT i.palabra) = %s
+        """
+        cursor.execute(query, (palabras, len(palabras)))
+        candidatos = cursor.fetchall()
 
-        # ============================================================
-        # PASO 2: Intersección multi-palabra
-        # ============================================================
-        # Encontrar qué páginas contienen cuáles palabras
-        all_page_ids = set()
-        page_word_map = {}  # { id_pagina: set(palabras) }
-
-        for palabra, paginas_dict in tf_data.items():
-            for id_pagina in paginas_dict:
-                all_page_ids.add(id_pagina)
-                if id_pagina not in page_word_map:
-                    page_word_map[id_pagina] = set()
-                page_word_map[id_pagina].add(palabra)
-
-        if not all_page_ids:
+        if not candidatos:
             time_taken = time.time() - start_time
             return jsonify({
                 "results": [],
@@ -148,178 +237,76 @@ def search():
                 "time_taken": round(time_taken, 4)
             })
 
-        # ============================================================
-        # PASO 3: Obtener métricas para BM25 (N y avgdl)
-        # ============================================================
-        # N = total de páginas indexadas (usamos páginas como "documentos")
-        cursor.execute("SELECT COUNT(*) FROM paginas_documento;")
-        N = float(cursor.fetchone()[0]) or 1.0
-
-        # avgdl = longitud promedio de todas las páginas (contando tokens del índice)
-        cursor.execute("""
-            SELECT COALESCE(AVG(cnt), 1) FROM (
-                SELECT id_pagina, COUNT(*) AS cnt 
-                FROM indice_invertido_uni 
-                GROUP BY id_pagina
-            ) sub;
-        """)
-        avgdl = float(cursor.fetchone()[0]) or 1.0
-
-        # Obtener longitud de cada página candidata
-        page_ids_list = list(all_page_ids)
-        cursor.execute("""
-            SELECT id_pagina, COUNT(*) AS longitud 
-            FROM indice_invertido_uni 
-            WHERE id_pagina = ANY(%s) 
-            GROUP BY id_pagina;
-        """, (page_ids_list,))
-        page_lengths = {}
-        for row in cursor.fetchall():
-            page_lengths[row[0]] = row[1]
-
-        # ============================================================
-        # PASO 4: Cálculo de BM25 con bonificación de proximidad
-        # ============================================================
         k1 = 1.2
         b = 0.75
-
-        # Precalcular IDF para cada palabra
-        word_idf = {}
+        
+        idf_dict = {}
         for palabra in palabras:
-            n_qi = len(tf_data.get(palabra, {}))
-            idf = math.log(((N - n_qi + 0.5) / (n_qi + 0.5)) + 1.0)
-            word_idf[palabra] = idf
+            df = df_dict.get(palabra, 0)
+            idf = math.log(((N - df + 0.5) / (df + 0.5)) + 1.0)
+            idf_dict[palabra] = idf
 
-        page_scores = []
-
-        for id_pagina in all_page_ids:
-            bm25_score = 0.0
-            doc_len = page_lengths.get(id_pagina, avgdl)
+        ranking = []
+        for fila in candidatos:
+            id_linea, id_drive, numero_linea, texto_linea, nombre_compuesto, url_acceso, frec_total, posiciones_por_palabra = fila
+            
+            score_bm25 = 0.0
+            doc_len = len(extraer_palabras(texto_linea))
             if doc_len == 0:
-                doc_len = avgdl
-
-            matched_words = list(page_word_map.get(id_pagina, set()))
-
-            for palabra in matched_words:
-                tf = tf_data[palabra][id_pagina]["frecuencia"]
-                idf = word_idf[palabra]
-
-                numerator = tf * (k1 + 1)
-                denominator = tf + k1 * (1 - b + b * (doc_len / avgdl))
-                bm25_score += idf * (numerator / denominator)
-
-            # Bonificación de proximidad para frases exactas
-            # Si hay múltiples palabras, verificar si las posiciones son consecutivas
-            if len(matched_words) > 1 and len(matched_words) == len(palabras):
-                proximity_bonus = calcular_bonus_proximidad(
-                    matched_words, id_pagina, tf_data
-                )
-                bm25_score *= proximity_bonus
-
-            page_scores.append({
-                "id_pagina": id_pagina,
-                "bm25_score": bm25_score,
-                "matched_words": matched_words,
-                "matched_count": len(matched_words)
+                doc_len = 1
+                
+            for palabra in palabras:
+                pos_lista = posiciones_por_palabra.get(palabra, [])
+                tf = len(pos_lista)
+                idf = idf_dict.get(palabra, 0.0)
+                
+                numerador = tf * (k1 + 1)
+                denominador = tf + k1 * (1.0 - b + b * (doc_len / avgdl))
+                score_bm25 += idf * (numerador / denominador)
+                
+            distancia = calcular_menor_distancia(posiciones_por_palabra, palabras)
+            
+            if distancia <= 3:
+                multiplicador_proximidad = 1.0 + (1.0 / (distancia + 1))
+            else:
+                multiplicador_proximidad = 1.0
+                
+            score_total = score_bm25 * multiplicador_proximidad
+            
+            ranking.append({
+                "id_linea": id_linea,
+                "nombre_compuesto": nombre_compuesto,
+                "numero_linea": numero_linea,
+                "texto_linea": texto_linea,
+                "url_acceso": url_acceso,
+                "score_total": score_total,
+                "posiciones": posiciones_por_palabra
             })
 
-        # ============================================================
-        # PASO 5: Clasificar y ordenar (Bloque A + Bloque B)
-        # ============================================================
-        k = len(palabras)
-        block_a = []  # Páginas con TODAS las palabras buscadas
-        block_b = []  # Páginas con solo ALGUNAS palabras
+        ranking.sort(key=lambda x: x["score_total"], reverse=True)
+        total_results = len(ranking)
 
-        for ps in page_scores:
-            if ps["matched_count"] == k:
-                block_a.append(ps)
-            elif ps["matched_count"] > 0:
-                block_b.append(ps)
-
-        block_a.sort(key=lambda x: x["bm25_score"], reverse=True)
-        block_b.sort(key=lambda x: (x["matched_count"], x["bm25_score"]), reverse=True)
-
-        sorted_pages = block_a + block_b
-        total_results = len(sorted_pages)
-
-        # ============================================================
-        # PASO 6: Paginación (bloques de 10)
-        # ============================================================
         limit = 10
         total_pages = math.ceil(total_results / limit)
         start_idx = (page - 1) * limit
         end_idx = start_idx + limit
-        current_page_items = sorted_pages[start_idx:end_idx]
+        current_page_items = ranking[start_idx:end_idx]
 
-        # ============================================================
-        # PASO 7: Recuperar metadatos + generar Snippets KWIC + Deep Links
-        # ============================================================
         results = []
-        if current_page_items:
-            page_ids_current = [p["id_pagina"] for p in current_page_items]
-
-            # JOIN entre paginas_documento y documentos_indexados
-            cursor.execute("""
-                SELECT 
-                    p.id_pagina,
-                    p.id_drive,
-                    p.numero_pagina,
-                    p.texto_pagina,
-                    d.nombre_compuesto,
-                    d.url_acceso
-                FROM paginas_documento p
-                INNER JOIN documentos_indexados d ON p.id_drive = d.id_drive
-                WHERE p.id_pagina = ANY(%s);
-            """, (page_ids_current,))
-
-            details_map = {}
-            for row in cursor.fetchall():
-                details_map[row[0]] = {
-                    "id_drive": row[1],
-                    "numero_pagina": row[2],
-                    "texto_pagina": row[3],
-                    "nombre_compuesto": row[4],
-                    "url_acceso": row[5]
-                }
-
-            # Construir la lista final respetando el orden del ranking
-            for ps in current_page_items:
-                id_pagina = ps["id_pagina"]
-                if id_pagina not in details_map:
-                    continue
-
-                details = details_map[id_pagina]
-
-                # Generar Snippet KWIC
-                primera_posicion = None
-                for palabra in ps["matched_words"]:
-                    if palabra in tf_data and id_pagina in tf_data[palabra]:
-                        posiciones = tf_data[palabra][id_pagina]["posiciones"]
-                        if posiciones:
-                            if primera_posicion is None or posiciones[0] < primera_posicion:
-                                primera_posicion = posiciones[0]
-
-                snippet = generar_snippet_kwic(
-                    details["texto_pagina"],
-                    primera_posicion,
-                    ps["matched_words"]
-                )
-
-                # Deep Link con #page=N
-                url_destino = details["url_acceso"]
-                if details["numero_pagina"]:
-                    url_destino = f"{details['url_acceso']}#page={details['numero_pagina']}"
-
-                results.append({
-                    "id_pagina": id_pagina,
-                    "nombre_compuesto": details["nombre_compuesto"],
-                    "numero_pagina": details["numero_pagina"],
-                    "snippet": snippet,
-                    "url_destino": url_destino,
-                    "matched_words": ps["matched_words"],
-                    "bm25_score": round(ps["bm25_score"], 4),
-                    "match_type": "all" if ps["matched_count"] == k else "some"
-                })
+        for item in current_page_items:
+            snippet = generar_snippet_kwic(item["texto_linea"], item["posiciones"])
+            deep_link = f"{item['url_acceso']}#line={item['numero_linea']}"
+            
+            results.append({
+                "id_linea": item["id_linea"],
+                "nombre_compuesto": item["nombre_compuesto"],
+                "numero_linea": item["numero_linea"],
+                "snippet": snippet,
+                "url_destino": deep_link,
+                "matched_words": list(item["posiciones"].keys()),
+                "bm25_score": round(item["score_total"], 4),
+                "match_type": "all"
+            })
 
         time_taken = time.time() - start_time
         return jsonify({
@@ -338,99 +325,6 @@ def search():
             cursor.close()
         if conn:
             conn.close()
-
-
-def calcular_bonus_proximidad(matched_words: list, id_pagina: int, tf_data: dict) -> float:
-    """
-    Calcula la bonificación multiplicativa por proximidad.
-    Si las posiciones relativas de los términos difieren en exactamente 1 unidad
-    (frase exacta), se aplica un multiplicador al score BM25.
-    """
-    if len(matched_words) < 2:
-        return 1.0
-
-    # Obtener las posiciones de cada palabra en esta página
-    word_positions = {}
-    for palabra in matched_words:
-        if palabra in tf_data and id_pagina in tf_data[palabra]:
-            word_positions[palabra] = tf_data[palabra][id_pagina]["posiciones"]
-
-    if len(word_positions) < 2:
-        return 1.0
-
-    # Verificar si existe algún par de posiciones consecutivas entre las palabras
-    palabras_lista = list(word_positions.keys())
-    pares_consecutivos = 0
-
-    for i in range(len(palabras_lista)):
-        for j in range(i + 1, len(palabras_lista)):
-            posiciones_a = set(word_positions[palabras_lista[i]])
-            posiciones_b = set(word_positions[palabras_lista[j]])
-
-            # Verificar si alguna posición de A está justo antes de alguna de B (o viceversa)
-            for pos_a in posiciones_a:
-                if (pos_a + 1) in posiciones_b or (pos_a - 1) in posiciones_b:
-                    pares_consecutivos += 1
-                    break
-
-    # Bonificación proporcional al número de pares adyacentes encontrados
-    max_pares = len(palabras_lista) - 1
-    if pares_consecutivos > 0:
-        # Multiplicador: 1.5x a 2.0x según cuántos pares consecutivos se encuentren
-        bonus = 1.0 + (0.5 * (pares_consecutivos / max_pares))
-        return min(bonus, 2.0)
-
-    return 1.0
-
-
-def generar_snippet_kwic(texto_pagina: str, posicion_ancla: int, palabras_clave: list, ventana: int = 10) -> str:
-    """
-    Genera un snippet KWIC (Key Word In Context) a partir del texto de la página.
-    Recorta una ventana de ±ventana palabras alrededor del punto de anclaje
-    y resalta las palabras clave con etiquetas <mark>.
-    """
-    if not texto_pagina:
-        return ""
-
-    palabras_texto = texto_pagina.split()
-
-    if not palabras_texto:
-        return ""
-
-    # Si no hay posición de anclaje válida, usar el inicio
-    if posicion_ancla is None or posicion_ancla < 0:
-        posicion_ancla = 0
-
-    # Ajustar si la posición excede el texto
-    if posicion_ancla >= len(palabras_texto):
-        posicion_ancla = max(0, len(palabras_texto) - 1)
-
-    # Calcular los límites de la ventana
-    inicio = max(0, posicion_ancla - ventana)
-    fin = min(len(palabras_texto), posicion_ancla + ventana + 1)
-
-    fragmento = palabras_texto[inicio:fin]
-
-    # Normalizar las palabras clave para la comparación
-    palabras_clave_lower = set(p.lower() for p in palabras_clave)
-
-    # Resaltar las palabras clave con <mark>
-    fragmento_resaltado = []
-    for palabra in fragmento:
-        palabra_limpia = re.sub(r'[^a-záéíóúñ0-9]', '', palabra.lower())
-        if palabra_limpia in palabras_clave_lower:
-            fragmento_resaltado.append(f"<mark>{palabra}</mark>")
-        else:
-            fragmento_resaltado.append(palabra)
-
-    # Construir el snippet con puntos suspensivos si fue recortado
-    snippet = " ".join(fragmento_resaltado)
-    if inicio > 0:
-        snippet = "..." + snippet
-    if fin < len(palabras_texto):
-        snippet = snippet + "..."
-
-    return snippet
 
 
 if __name__ == "__main__":

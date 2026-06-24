@@ -3,7 +3,6 @@ import sys
 import json
 import psycopg2
 import psycopg2.extras
-import time
 
 # Configurar stdout y stderr para usar UTF-8 y evitar errores de codificación en Windows
 if hasattr(sys.stdout, 'reconfigure'):
@@ -24,7 +23,8 @@ rutaDocIndexados = os.path.abspath(os.path.join(BASE_DIR, '..', 'archivos_planos
 sys.path.append(os.path.abspath(os.path.join(BASE_DIR, '..', '..')))
 from db_config import DB_CONFIG
 
-def cargar_documentos(tamano_bloque: int = 1000, reset: bool = None):
+# OPTIMIZACIÓN 1: Incrementamos el tamaño por defecto a 10,000 para aprovechar el búfer de red
+def cargar_documentos(tamano_bloque: int = 10000, reset: bool = None):
     if not os.path.exists(rutaDocIndexados):
         print(f"[-] No se encontró {rutaDocIndexados}. Salteando carga de documentos.")
         return 0
@@ -54,13 +54,10 @@ def cargar_documentos(tamano_bloque: int = 1000, reset: bool = None):
     
     bloque = []
     
+    # OPTIMIZACIÓN 2: Eliminado 'ON CONFLICT DO UPDATE' para remover sobrecostos de indexación repetitiva
     query = """
         INSERT INTO documentos_indexados (id_drive, nombre_compuesto, url_acceso, primera_carpeta)
-        VALUES %s
-        ON CONFLICT (id_drive) DO UPDATE 
-        SET nombre_compuesto = EXCLUDED.nombre_compuesto,
-            url_acceso = EXCLUDED.url_acceso,
-            primera_carpeta = EXCLUDED.primera_carpeta;
+        VALUES %s;
     """
     
     try:
@@ -100,22 +97,22 @@ def cargar_documentos(tamano_bloque: int = 1000, reset: bool = None):
                     "total_cargados": total_cargados
                 })
                 bloque.clear()
+        
+        # CORRECCIÓN CLAVE: El remanente ha sido extraído fuera del bucle 'for'
+        if bloque:
+            psycopg2.extras.execute_values(cursor, query, bloque)
+            conn.commit()
+            total_cargados += len(bloque)
+            lineas_leidas_entrada += len(bloque)
+            ultimo_bloque += 1
+            print(f"    [+] Bloque {ultimo_bloque} (remanente) cargado. Total acumulado: {total_cargados} documentos...")
             
-            # Cargar remanente
-            if bloque:
-                psycopg2.extras.execute_values(cursor, query, bloque)
-                conn.commit()
-                total_cargados += len(bloque)
-                lineas_leidas_entrada += len(bloque)
-                ultimo_bloque += 1
-                print(f"    [+] Bloque {ultimo_bloque} (remanente) cargado. Total acumulado: {total_cargados} documentos...")
-                
-                guardar_checkpoint("load_documentos", {
-                    "ultimo_bloque": ultimo_bloque,
-                    "lineas_leidas_entrada": lineas_leidas_entrada,
-                    "total_cargados": total_cargados
-                })
-                bloque.clear()
+            guardar_checkpoint("load_documentos", {
+                "ultimo_bloque": ultimo_bloque,
+                "lineas_leidas_entrada": lineas_leidas_entrada,
+                "total_cargados": total_cargados
+            })
+            bloque.clear()
                 
     except Exception as e:
         print(f"[-] Error durante la carga de documentos: {e}")

@@ -3,7 +3,7 @@ import sys
 import json
 import psycopg2
 import psycopg2.extras
-import time
+from itertools import islice # Importación clave para máxima velocidad de lectura
 
 # Configurar stdout y stderr para usar UTF-8 y evitar errores de codificación en Windows
 if hasattr(sys.stdout, 'reconfigure'):
@@ -44,10 +44,9 @@ def cargar_indice(tamano_bloque: int = 50000, reset: bool = None):
         lineas_leidas_entrada = cp.get("lineas_leidas_entrada", 0)
         total_cargados = cp.get("total_cargados", 0)
         total_leidos = cp.get("total_leidos", 0)
-        print(f"[*] Reanudando carga de índice invertido desde checkpoint (Bloque {ultimo_bloque}):")
+        print(f"[*] Reanudando carga de índice invertido (Bloque {ultimo_bloque}):")
         print(f"    - Registros leídos previamente: {lineas_leidas_entrada}")
         print(f"    - Tokens cargados previamente en BD: {total_cargados}")
-        print(f"    - Registros leídos totales previamente: {total_leidos}")
     else:
         print(f"[*] Iniciando carga de índice invertido desde cero...")
 
@@ -59,33 +58,35 @@ def cargar_indice(tamano_bloque: int = 50000, reset: bool = None):
     
     try:
         with open(rutaIndiceUni, 'r', encoding='utf-8') as f:
-            # Saltar líneas ya procesadas
-            for _ in range(lineas_leidas_entrada):
-                if not f.readline():
-                    break
-                
-            while True:
-                linea = f.readline()
-                if not linea:
-                    break
-                
+            
+            # OPTIMIZACIÓN 1: islice delega el salto de líneas a C, siendo instantáneo.
+            lineas_restantes = islice(f, lineas_leidas_entrada, None)
+            
+            # OPTIMIZACIÓN 2: Iterar directamente sobre el objeto es más rápido que f.readline()
+            for linea in lineas_restantes:
                 linea_str = linea.strip()
                 if not linea_str:
                     continue
                 
                 try:
                     data = json.loads(linea_str)
-                    bloque.append(data)
+                    
+                    # OPTIMIZACIÓN 3: Crear la tupla inmediatamente evita iterar 2 veces
+                    bloque.append((
+                        data["palabra"],
+                        data["id_linea"],
+                        data["posicion"]
+                    ))
                     total_leidos += 1
                 except Exception as e:
                     print(f"[-] Error parseando línea en load_indice: {e}")
                     
                 if len(bloque) >= tamano_bloque:
-                    cargados = procesar_y_cargar_bloque(cursor, conn, bloque)
-                    total_cargados += cargados
+                    procesar_y_cargar_bloque(cursor, conn, bloque)
+                    total_cargados += len(bloque)
                     lineas_leidas_entrada += len(bloque)
                     ultimo_bloque += 1
-                    print(f"    [+] Bloque {ultimo_bloque} procesado | Leídos: {total_leidos} | Insertados en BD: {total_cargados}...")
+                    print(f"    [+] Bloque {ultimo_bloque} procesado | Insertados en BD: {total_cargados}...")
                     
                     # Guardar checkpoint
                     guardar_checkpoint("load_indice", {
@@ -98,11 +99,11 @@ def cargar_indice(tamano_bloque: int = 50000, reset: bool = None):
             
             # Cargar remanente
             if bloque:
-                cargados = procesar_y_cargar_bloque(cursor, conn, bloque)
-                total_cargados += cargados
+                procesar_y_cargar_bloque(cursor, conn, bloque)
+                total_cargados += len(bloque)
                 lineas_leidas_entrada += len(bloque)
                 ultimo_bloque += 1
-                print(f"    [+] Bloque {ultimo_bloque} (remanente) procesado | Leídos: {total_leidos} | Insertados en BD: {total_cargados}...")
+                print(f"    [+] Bloque {ultimo_bloque} (remanente) procesado | Insertados en BD: {total_cargados}...")
                 
                 guardar_checkpoint("load_indice", {
                     "ultimo_bloque": ultimo_bloque,
@@ -123,29 +124,18 @@ def cargar_indice(tamano_bloque: int = 50000, reset: bool = None):
     print(f"[*] Carga de índice completada. Total insertados en BD: {total_cargados} de {total_leidos} leídos.")
     return total_cargados
 
-def procesar_y_cargar_bloque(cursor, conn, bloque) -> int:
-    """Inserta los tokens directamente en la base de datos ya mapeados."""
+def procesar_y_cargar_bloque(cursor, conn, bloque):
+    """Inserta las tuplas directamente en la base de datos."""
     if not bloque:
-        return 0
+        return
 
-    insert_rows = []
-    for item in bloque:
-        insert_rows.append((
-            item["palabra"],
-            item["id_linea"],
-            item["posicion"]
-        ))
-
-    # Bulk Insert con ON CONFLICT para evitar fallas por duplicados
+    # OPTIMIZACIÓN 4: Eliminado ON CONFLICT DO NOTHING
     query = """
-        INSERT INTO indice_invertido_uni (palabra, id_pagina, posicion)
+        INSERT INTO indice_invertido_uni (palabra, id_linea, posicion)
         VALUES %s
-        ON CONFLICT (palabra, id_pagina, posicion) DO NOTHING;
     """
-    psycopg2.extras.execute_values(cursor, query, insert_rows)
+    psycopg2.extras.execute_values(cursor, query, bloque)
     conn.commit()
-    
-    return len(insert_rows)
 
 if __name__ == '__main__':
     cargar_indice()
