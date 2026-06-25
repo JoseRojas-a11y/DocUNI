@@ -85,16 +85,17 @@ def get_corpus_stats(cursor):
 def calcular_menor_distancia(posiciones_por_palabra: dict, palabras: list[str]) -> int:
     """
     Calcula la distancia absoluta mínima que separa a las palabras de la consulta 
-    en la línea actual utilizando sus arreglos de posiciones.
+    en la línea actual utilizando sus arreglos de posiciones (considerando solo las palabras presentes).
     """
     if len(palabras) < 2:
         return 0
         
-    import itertools
-    posiciones_listas = [posiciones_por_palabra.get(p, []) for p in palabras]
-    
-    if any(not lst for lst in posiciones_listas):
+    palabras_presentes = [p for p in palabras if p in posiciones_por_palabra and posiciones_por_palabra[p]]
+    if len(palabras_presentes) < 2:
         return 99999
+        
+    import itertools
+    posiciones_listas = [posiciones_por_palabra[p] for p in palabras_presentes]
         
     min_span = float('inf')
     for combo in itertools.product(*posiciones_listas):
@@ -102,7 +103,7 @@ def calcular_menor_distancia(posiciones_por_palabra: dict, palabras: list[str]) 
         if span < min_span:
             min_span = span
             
-    distancia = min_span - (len(palabras) - 1)
+    distancia = min_span - (len(palabras_presentes) - 1)
     return int(distancia)
 
 def generar_snippet_kwic(texto_linea: str, posiciones_por_palabra: dict) -> str:
@@ -225,9 +226,8 @@ def search():
             JOIN lineas_documento l ON i.id_linea = l.id_linea
             JOIN documentos_indexados d ON l.id_drive = d.id_drive
             GROUP BY i.id_linea, l.id_drive, l.numero_fila, l.texto_fila, d.nombre_compuesto, d.url_acceso
-            HAVING COUNT(DISTINCT i.palabra) = %s
         """
-        cursor.execute(query, (palabras, len(palabras)))
+        cursor.execute(query, (palabras,))
         candidatos = cursor.fetchall()
 
         if not candidatos:
@@ -309,7 +309,7 @@ def search():
                 "url_destino": deep_link,
                 "matched_words": list(item["posiciones"].keys()),
                 "bm25_score": round(item["score_total"], 4),
-                "match_type": "all"
+                "match_type": "all" if len(item["posiciones"]) == len(palabras) else "partial"
             })
 
         time_taken = time.time() - start_time

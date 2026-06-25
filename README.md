@@ -1,6 +1,6 @@
 # DocUNI - Buscador Inteligente de Documentos
 
-DocUNI es un motor de búsqueda rápido e inteligente diseñado para buscar e indexar documentos académicos (planchas, sistemas, etc.). Utiliza un índice inverso almacenado en una base de datos PostgreSQL y emplea el sofisticado algoritmo **Okapi BM25** para garantizar que los resultados más relevantes se presenten primero.
+DocUNI es un motor de búsqueda rápido e inteligente diseñado para buscar e indexar documentos académicos (planchas, sistemas, etc.). Utiliza un índice inverso posicional almacenado en una base de datos PostgreSQL en Primera Forma Normal (1NF) y emplea el sofisticado algoritmo **Okapi BM25** con optimizaciones de proximidad para garantizar que los resultados más relevantes se presenten primero.
 
 ---
 
@@ -15,7 +15,7 @@ El proyecto está dockerizado para facilitar su ejecución y despliegue sin depe
 ### Pasos para ejecutar:
 1. Asegúrate de tener los archivos CSV generados por el proceso batch. Estos documentos se encuentran dentro de "https://drive.google.com/drive/folders/1Z1pa3MrlHYy0LpVogrYO8N58bN2YRFaC?usp=drive_link". 
 
-**Nota**: Estos son utilizados por el script de inicialización `docker-init-data.sql` para poblar la base de datos de manera súper rápida usando el comando `COPY`. Colocar la descrompreción del `DATA.zip` raiz en la misma raiz del proyecto. Colocar `Tablas-temporales.zip` dentro de la carpeta `proceso_batch/archivos_planos`.
+**Nota**: Estos son utilizados por el script de inicialización `docker-init-data.sql` para poblar la base de datos de manera súper rápida usando el comando `COPY`. Coloca la descompresión del `DATA.zip` en la raíz del proyecto. Coloca `Tablas-temporales.zip` dentro de la carpeta `proceso_batch/archivos_planos`.
 
 2. Abre una terminal en la raíz del proyecto.
 3. Ejecuta el siguiente comando para construir las imágenes y levantar los contenedores:
@@ -33,11 +33,11 @@ El proyecto está dockerizado para facilitar su ejecución y despliegue sin depe
 
 ---
 
-## 1. Secuencia del Proceso Batch (Generación del Índice Inverso)
+## 1. Flujo de Ingesta y Procesamiento Batch (Pipeline ETL)
 
-El índice inverso es el "corazón" del motor de búsqueda. Se genera a través de un flujo de procesamiento por lotes (*batch*) dividido en 5 scripts principales ejecutados en secuencia.
+El índice inverso es el "corazón" del motor de búsqueda. Se genera a través de un flujo de procesamiento por lotes (*batch*) dividido en 5 scripts de Python ejecutados secuencialmente.
 
-### Diagrama del Proceso Batch
+### 1.1. Diagrama del Proceso Batch
 
 ```mermaid
 flowchart TD
@@ -55,257 +55,414 @@ flowchart TD
 
     %% 1. CRAWLER
     subgraph crawler_sub["1. crawler.py"]
-        C1["Extraer metadatos de archivos académicos (DFS)"]
+        C1["Recorrer carpetas de Google Drive (DFS)"]
+    end
+
+    %% Archivo crawled_documents.jsonl
+    subgraph crawled_sub["Metadatos de Archivos"]
+        FC["crawled_documents.jsonl"]
     end
 
     %% 2. DATA INGESTION
     subgraph ingestion_sub["2. dataIngestion.py"]
-        I1["Descargar archivos binarios en paralelo (15 hilos)"]
-        I2["Extraer texto con Apache Tika y normalizar a minúsculas"]
+        I1["Descargar archivos binarios en paralelo"]
+        I2["Extraer texto con Apache Tika y EasyOCR (OpenCV)"]
     end
 
-    %% Archivo intermedio
-    subgraph file_plano_sub["Archivo Plano Intermedio"]
-        F1["ingesta_intermedia_uni.txt"]
+    %% Archivos intermedios de Ingesta
+    subgraph file_plano_sub["Archivos Planos de Ingesta"]
+        F1["documentos_indexados.jsonl"]
+        F2["paginas_documento.jsonl"]
     end
 
     %% 3. INDEX MAKER
     subgraph indexmaker_sub["3. indexMaker.py"]
-        M1["Agrupar tokens del vocabulario en memoria"]
-        M2{"Ordenar documentos por frecuencia de mayor a menor"}
+        M1["Tokenizar texto de páginas y normalizar palabras"]
+        M2["Extraer tuplas (palabra, id_linea, posicion)"]
     end
 
-    %% Archivo final JSONL
-    subgraph file_jsonl_sub["Archivo Final JSONL"]
-        F2["indice_invertido_final.jsonl"]
+    %% Archivo temporal
+    subgraph file_temp_sub["Fichas Temporales"]
+        F_TEMP["indice_invertido_uni_temp.jsonl"]
     end
 
-    %% 4. LENGTH CALCULATOR
-    subgraph lencalc_sub["4. lenCalculator.py"]
-        L1["Calcular cantidad de palabras de cada documento (longitud)"]
+    %% 4. INDEX SORTER
+    subgraph indexsorter_sub["4. indexSorter.py"]
+        S1["Cargar fichas en memoria y ordenar lexicográficamente"]
+    end
+
+    %% Archivo final ordenado
+    subgraph file_sorted_sub["Fichas Ordenadas"]
+        F_SORTED["indice_invertido_uni.jsonl"]
     end
 
     %% 5. LOAD
-    subgraph load_sub["5. load.py"]
-        LD1["Cargar índice de forma masiva (Batch INSERT/ON CONFLICT)"]
+    subgraph load_sub["5. load.py (Orquestador)"]
+        LD_DOCS["load_documentos.py"]
+        LD_LINEAS["load_lineas.py"]
+        LD_INDICE["load_indice.py"]
     end
 
     %% Base de Datos
-    subgraph BD["Base de Datos PostgreSQL"]
+    subgraph BD["Base de Datos PostgreSQL (1NF)"]
         DB_DI[("Tabla: documentos_indexados")]
-        DB_IDU[("Tabla: indice_docu_uni")]
+        DB_LD[("Tabla: lineas_documento")]
+        DB_IIU[("Tabla: indice_invertido_uni")]
     end
 
     %% Flujo principal
     GD --> C1
-    C1 --> I1
+    C1 --> FC
+    FC --> I1
     I1 --> I2
     I2 --> F1
-    F1 --> M1
+    I2 --> F2
+    F2 --> M1
     M1 --> M2
-    M2 --> F2
-    F1 --> L1
-    F2 --> LD1
-
-    %% Conexiones a BD
-    C1 -->|1. Carga metadata inicial| DB_DI
-    I2 -->|2. Actualiza flag procesado = TRUE| DB_DI
-    L1 -->|3. Actualiza campo longitud masivamente| DB_DI
-    LD1 -->|4. Carga índice inverso final| DB_IDU
+    M2 --> F_TEMP
+    F_TEMP --> S1
+    S1 --> F_SORTED
+    
+    %% Conexión a Load y BD
+    F1 --> LD_DOCS
+    F2 --> LD_LINEAS
+    F_SORTED --> LD_INDICE
+    
+    LD_DOCS --> DB_DI
+    LD_LINEAS --> DB_LD
+    LD_INDICE --> DB_IIU
 
     %% Aplicar estilos
     class GD startBlock;
-    class C1,I1,I2,M1,L1,LD1 processBlock;
-    class M2 sortBlock;
-    class F1,F2 fileBlock;
-    class DB_DI,DB_IDU dbBlock;
+    class C1,I1,I2,M1,M2,S1,LD_DOCS,LD_LINEAS,LD_INDICE processBlock;
+    class FC,F1,F2,F_TEMP,F_SORTED fileBlock;
+    class DB_DI,DB_LD,DB_IIU dbBlock;
 ```
 
-### 1. `crawler.py`
-- **¿Qué hace?**: Se encarga de navegar o conectarse a los orígenes de datos (como Google Drive u otros repositorios) para extraer los documentos crudos y/o su metadata (nombre original, categoría, URLs de acceso).
-- **Formato de entrada**: APIs externas o sistema de archivos.
-- **Formato de salida**: Sube la data a la base de datos en la tabla de "documentos_indexados".
-  - *Ejemplo de metadata insertada*:
-    ```json
-    {
-      "id_drive": "1A2B3C4D5E",
-      "nombre_original": "examen_parcial_2023.pdf",
-      "categoria_principal": "Sistemas Operativos"
-    }
-    ```
+### 1.2. Secuencia de Scripts Batch
 
-### 2. `dataIngestion.py`
-- **¿Qué hace?**: Procesa los datos crudos extraídos por el crawler. Extrae el texto, lo convierte a minúsculas, elimina puntuación/caracteres especiales mediante expresiones regulares, y separa el contenido en palabras válidas.
-- **Formato de entrada**: Con las direcciones obtenidas del crawler, el sistema utiliza la api de Google Drive para descargar los datos. Utiliza: id_drive.
-- **Formato de salida**: Un archivo plano intermedio (ej. `ingesta_intermedia_uni.txt`) que contiene listas de palabras mapeadas a los documentos. Formato: "{id_drive} | {palabras}"
-  - *Ejemplo de línea generada*:
-    `1A2B3C4D5E | examen parcial sistemas operativos resolucion...`
+1. **`crawler.py`**
+   - **¿Qué hace?**: Recorre recursivamente (búsqueda en profundidad - DFS) la estructura de directorios en Google Drive mediante su API para detectar archivos académicos.
+   - **Formato de entrada**: Consulta remota a la API de Google Drive v3.
+   - **Formato de salida**: Archivo plano `crawled_documents.jsonl` en la carpeta `proceso_batch/archivos_planos/` con el ID de Drive, nombre original, carpetas padre y URLs de acceso de cada archivo encontrado.
 
-### 3. `indexMaker.py`
-- **¿Qué hace?**: Toma el archivo de ingesta y construye propiamente el **índice inverso**. Agrupa todas las palabras únicas del vocabulario y asocia cada una a la lista de documentos (`id_drive`) donde aparece, sumando también la frecuencia (cantidad de veces que aparece en ese documento).
-- **Formato de entrada**: `ingesta_intermedia_uni.txt`.
-- **Formato de salida**: Un archivo temporal JSON (como `indice_docu_uni.json`) o estructuras en memoria preparadas para exportación.
-  - *Ejemplo de estructura generada*:
-    ```json
-    {
-      "palabra": "sistemas",
-      "documentos": [
-        {"id_drive": "1A2B3C4D5E", "frecuencia": 5},
-        {"id_drive": "9Z8Y7X6W5V", "frecuencia": 2}
-      ]
-    }
-    ```
+2. **`dataIngestion.py`**
+   - **¿Qué hace?**: Descarga en paralelo (utilizando múltiples hilos) los recursos binarios listados en `crawled_documents.jsonl`. Realiza la extracción híbrida de texto: usa Apache Tika para formatos de texto nativo (PDF digitales, DOCX, TXT) y un pipeline óptico con OpenCV y EasyOCR para procesar mapas de bits e imágenes procedentes de PDF escaneados.
+   - **Formato de entrada**: Archivo `crawled_documents.jsonl` y descarga de datos desde Google Drive API.
+   - **Formato de salida**: 
+     - `documentos_indexados.jsonl`: metadatos de los archivos descargados.
+     - `paginas_documento.jsonl`: texto completo segmentado línea por línea (por página) identificada con un identificador secuencial.
 
-### 4. `lenCalculator.py`
-- **¿Qué hace?**: Recorre la data procesada para calcular la **longitud total** (cantidad total de palabras) de cada documento. Este cálculo es estrictamente necesario para poder aplicar la penalización de longitud del algoritmo BM25 más adelante.
-- **Formato de entrada**: Archivo de ingesta intermedio o JSONs temporales.
-- **Formato de salida**: Archivos o estructuras donde la metadata del documento se actualiza añadiendo el campo `longitud` a los datos de la tabla "documentos_indexados".
-  - *Ejemplo de actualización*:
-    Tras contar las palabras de la línea en `ingesta_intermedia_uni.txt`, se determina que el documento `1A2B3C4D5E` tiene `350` palabras. El campo `longitud` se actualiza a `350`.
+3. **`indexMaker.py`**
+   - **¿Qué hace?**: Lee las páginas indexadas desde `paginas_documento.jsonl`, limpia y tokeniza el contenido. Aplica normalización avanzada en español (remoción de acentos, tildes, paso a minúsculas, filtrado de símbolos, eliminación de plurales al quitar la `s` final en palabras de más de 3 caracteres y corrección de errores típicos de OCR). Genera las tuplas posicionales `(palabra, id_linea, posicion)`.
+   - **Formato de entrada**: `paginas_documento.jsonl`.
+   - **Formato de salida**: Archivo temporal `indice_invertido_uni_temp.jsonl` conteniendo las fichas posicionales desordenadas de cada token.
 
-### 5. `load.py`
-- **¿Qué hace?**: Actúa como el exportador final. Convierte las estructuras procesadas (documentos indexados con sus longitudes, y el índice inverso JSON) en archivos delimitados listos para ser importados a la base de datos a alta velocidad.
-- **Formato de entrada**: Estructuras en memoria o archivos JSON de los pasos 3 y 4.
-- **Formato de salida**: Archivos **`.csv`** que se ubican en las carpetas `documentos_data` e `indice_docu_data`, preparados para ser leídos por PostgreSQL vía `COPY`.
-  - *Ejemplo de fila en `indice_docu_data/data.csv`*:
-    `sistemas,"[{""id_drive"": ""1A2B3C4D5E"", ""frecuencia"": 5}, {""id_drive"": ""9Z8Y7X6W5V"", ""frecuencia"": 2}]"`
+4. **`indexSorter.py`**
+   - **¿Qué hace?**: Lee el archivo temporal de fichas, las carga en memoria y las ordena lexicográficamente por término (y numéricamente por `id_linea` y `posicion`). Este paso optimiza drásticamente el proceso de inserción masiva a PostgreSQL.
+   - **Formato de entrada**: `indice_invertido_uni_temp.jsonl`.
+   - **Formato de salida**: Archivo plano final `indice_invertido_uni.jsonl` listo para importarse.
+
+5. **`load.py`**
+   - **¿Qué hace?**: Es el script orquestador de la fase de carga (Load). Llama secuencialmente a tres scripts especializados para importar la data de manera eficiente utilizando Bulk Inserts (`execute_values` de `psycopg2`) y controlando conflictos mediante sentencias `ON CONFLICT DO NOTHING`:
+     - `load_documentos.py`: Lee `documentos_indexados.jsonl` y puebla la tabla `documentos_indexados`.
+     - `load_lineas.py`: Lee `paginas_documento.jsonl` y puebla la tabla `lineas_documento`.
+     - `load_indice.py`: Lee `indice_invertido_uni.jsonl` y puebla el índice inverso atómico `indice_invertido_uni`.
+   - **Formato de entrada**: Archivos planos `.jsonl` resultantes de las fases anteriores.
+   - **Formato de salida**: Tablas pobladas e indexadas en PostgreSQL.
 
 ---
 
-## 2. El algoritmo de Ordenamiento: Okapi BM25
+### 1.3. Extracción e Ingesta Híbrida (Tika vs OCR)
 
-Para entregar los mejores resultados, DocUNI no se basa solo en un recuento simple de palabras, sino que implementa **Okapi BM25** (Best Matching 25), un estándar de la industria en motores de búsqueda modernos.
+El pipeline de ingesta implementa un enrutamiento inteligente basado en el tipo MIME de los archivos descargados:
 
-### ¿Cómo funciona?
-BM25 califica la relevancia de un documento frente a una consulta (*query*) basándose en tres componentes fundamentales:
+```
+                  [ Descarga desde Google Drive API ]
+                                  │
+                    ────── Evaluador MIME ──────
+                   │                            │
+         [ Archivo Texto Nativo ]       [ Imagen / PDF Escaneado ]
+                   │                            │
+           ( Apache Tika )               ( Módulo OCR Local )
+                   │                     ├─ OpenCV: Filtros & Limpieza
+                   │                     └─ EasyOCR: Inferencia Neuronal
+                   │                            │
+                   └─────► [ Unificación ] ◄────┘
+                                  │
+                      ( Inserción en lineas_documento )
+                                  │
+                      ( Tokenización & Posicionamiento )
+                                  │
+                     ( Bulk Insert en indice_invertido_uni )
+```
 
-1. **Frecuencia del término (TF - Term Frequency)**: Recompensa a los documentos donde la palabra buscada aparece muchas veces. Sin embargo, aplica una *saturación*: si una palabra aparece 50 veces, no es 50 veces más relevante que si aparece 1 vez, el crecimiento del valor se aplana gradualmente (controlado por la constante $k_1$).
-2. **Frecuencia Inversa de Documento (IDF)**: Penaliza las palabras comunes y recompensa las palabras raras. Si buscas "sistemas distribuidos", la palabra "sistemas" probablemente aparezca en muchos documentos, aportando poco valor discriminativo. "Distribuidos" será más rara, por ende, el algoritmo le otorgará un peso (IDF) mucho mayor en el puntaje final.
-3. **Normalización por Longitud del Documento**: Si un documento es enorme (un libro de 500 páginas), es natural que contenga muchas veces tus palabras de búsqueda. Si un documento corto (1 página) contiene tus palabras la misma cantidad de veces, el documento corto es mucho más relevante. BM25 penaliza los documentos que son más largos que el promedio general de la colección (controlado por la constante $b$).
+#### Ruta A (Documentos Digitales Nativos)
+Si el archivo es un PDF con capa de texto, DOCX o TXT, `Apache Tika` parsea el buffer y extrae el texto respetando los saltos de página XML nativos.
 
-### Fórmulas Matemáticas y Parámetros del Código
+#### Ruta B (Imágenes y Documentos Escaneados)
+Si el archivo es una imagen (`.png`, `.jpg`, `.jpeg`) o un PDF sin capa de texto legible, se activa el submódulo óptico local:
+- **Conversión de PDF a imágenes**: `pdf2image` renderiza cada página del documento en un mapa de bits independiente en memoria.
+- **Preprocesamiento Óptico (OpenCV)**: Cada imagen se convierte a escala de grises y se le aplica un desenfoque mediano (`medianBlur`) para reducir el ruido visual y optimizar los bordes antes de la detección:
+  ```python
+  import cv2
+  import numpy as np
 
-El algoritmo calcula el score de relevancia de cada documento $D$ para una consulta $Q$ (con palabras clave $q_1, q_2, \dots, q_n$) de la siguiente forma:
+  def preprocesar_imagen(imagen_bytes):
+      # Convertir el buffer de bytes a una matriz OpenCV
+      nparr = np.frombuffer(imagen_bytes, np.uint8)
+      img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+      # Reducción de ruido mediante filtro de mediana
+      img_limpia = cv2.medianBlur(img, 3)
+      return img_limpia
+  ```
+- **Inferencia Neuronal (EasyOCR)**: La imagen limpia es procesada por el motor de EasyOCR configurado para español. El objeto `Reader` se inicializa de manera global una sola vez para optimizar tiempos:
+  ```python
+  import easyocr
 
-#### 1. Fórmula General del Score BM25
+  # Instanciación única global
+  reader = easyocr.Reader(['es'], gpu=False)
+
+  def extraer_texto_ocr(imagen_procesada):
+      # Extracción directa del texto crudo consolidado
+      lineas_texto = reader.readtext(imagen_procesada, detail=0)
+      return "\n".join(lineas_texto)
+  ```
+
+Tras obtener el texto mediante cualquiera de las rutas, cada página o fragmento se registra en la base de datos en la tabla `lineas_documento`:
+```sql
+INSERT INTO lineas_documento (id_drive, numero_fila, texto_fila) 
+VALUES (%s, %s, %s) RETURNING id_linea;
+```
+
+---
+
+### 1.4. Tokenización y Mapeo Posicional
+
+Para cada fila o página indexada con un `id_linea`:
+1. El texto se normaliza (remoción de tildes, paso a minúsculas, caracteres especiales y eliminación de plurales al quitar la `s` final en palabras de longitud mayor a 3).
+2. El texto normalizado se divide por espacios en un vector ordenado de palabras (`tokens`).
+3. Se itera secuencialmente sobre el vector para generar los registros posicionales que determinan el orden físico exacto de aparición del término en el fragmento: `("termino1", id_linea, 0)`, `("termino2", id_linea, 1)`, etc.
+
+---
+
+### 1.5. Inserción Masiva por Lotes (Bulk Insert)
+
+Dado que modelar el índice a nivel posicional y atómico genera millones de filas, realizar inserciones individuales degradaría el rendimiento de PostgreSQL. Se utiliza la inserción masiva por lotes (Bulk Insert) a través de `execute_values` de `psycopg2` y control de colisión por clave primaria compuesta:
+
+```python
+import psycopg2
+from psycopg2.extras import execute_values
+
+def guardar_lote_indice(cursor, lote_tuplas_atomicas):
+    query_insert = """
+        INSERT INTO indice_invertido_uni (palabra, id_linea, posicion) 
+        VALUES %s 
+        ON CONFLICT (palabra, id_linea, posicion) DO NOTHING
+    """
+    execute_values(cursor, query_insert, lote_tuplas_atomicas)
+```
+
+---
+
+## 2. Algoritmo de Búsqueda y Extracción (Information Retrieval en Read-Time)
+
+Al delegar los cálculos al momento de la lectura (Read-Time Computation), el motor se mantiene reactivo ante cambios rápidos en el corpus.
+
+### 2.1. Recuperación y Cálculo de Frecuencia (TF) Local al Vuelo
+
+Cuando se busca una sola palabra, el motor extrae de forma instantánea su frecuencia local (`tf`) agrupando por `id_linea` y guardando la lista de posiciones físicas:
+
+```sql
+SELECT 
+    id_linea, 
+    COUNT(*) AS frecuencia, 
+    ARRAY_AGG(posicion ORDER BY posicion) AS lista_posiciones 
+FROM indice_invertido_uni 
+WHERE palabra = 'sistemas' 
+GROUP BY id_linea;
+```
+
+### 2.2. Búsqueda Multi-palabra No Estricta (OR)
+
+Para consultas complejas con múltiples palabras, se remueve el comportamiento estrictamente conjuntivo (AND) y se recuperan de forma agregada todas las líneas que posean al menos uno de los términos buscados. La base de datos agrupa y devuelve las posiciones asociadas de forma compacta en JSONB:
+
+```sql
+SELECT 
+    i.id_linea,
+    l.id_drive,
+    l.numero_fila AS numero_linea,
+    l.texto_fila AS texto_linea,
+    d.nombre_compuesto,
+    d.url_acceso,
+    COUNT(r.posicion) AS frecuencia_total,
+    jsonb_object_agg(i.palabra, i.posiciones) AS posiciones_por_palabra
+FROM (
+    SELECT 
+        id_linea, 
+        palabra, 
+        array_agg(posicion ORDER BY posicion) AS posiciones
+    FROM indice_invertido_uni
+    WHERE palabra = ANY(%s)
+    GROUP BY id_linea, palabra
+) i
+JOIN indice_invertido_uni r ON r.id_linea = i.id_linea AND r.palabra = i.palabra
+JOIN lineas_documento l ON i.id_linea = l.id_linea
+JOIN documentos_indexados d ON l.id_drive = d.id_drive
+GROUP BY i.id_linea, l.id_drive, l.numero_fila, l.texto_fila, d.nombre_compuesto, d.url_acceso
+```
+
+---
+
+## 3. Algoritmo de Ranking y Generación de Resultados
+
+### 3.1. Puntuación Matemática Okapi BM25
+
+El motor calcula la relevancia estadística de cada fragmento (línea) para la consulta $Q$ (que consta de palabras clave $q_1, q_2, \dots, q_n$) utilizando la fórmula probabilística Okapi BM25:
 
 $$\text{Score}_{\text{BM25}}(D, Q) = \sum_{i=1}^{n} \text{IDF}(q_i) \cdot \frac{f(q_i, D) \cdot (k_1 + 1)}{f(q_i, D) + k_1 \cdot \left(1 - b + b \cdot \frac{|D|}{\text{avgdl}}\right)}$$
 
-#### 2. Fórmula de la Frecuencia Inversa de Documento (IDF)
-
 $$\text{IDF}(q_i) = \ln \left( \frac{N - n(q_i) + 0.5}{n(q_i) + 0.5} + 1 \right)$$
 
----
-
-#### - Desglose Visual y Equivalencias en el Código
-
-A continuación se detalla cada componente de la fórmula y cómo está mapeado en el backend (`aplicativo/app.py`):
+#### - Desglose de Parámetros en el Código (`aplicativo/app.py`):
 
 | Símbolo Matemático | Variable en Código | Tipo/Valor | Descripción |
 | :---: | :---: | :---: | :--- |
-| $N$ | `N` | Dinámico (Float) | Número total de documentos indexados y procesados (`procesado = TRUE`). |
-| $n(q_i)$ | `n_qi` | Dinámico (Int) | Cantidad de documentos que contienen la palabra clave $q_i$. |
-| $\text{avgdl}$ | `avgdl` | Dinámico (Float) | Longitud promedio (cantidad de palabras) de todos los documentos. |
-| $|D|$ | `doc_len` | Dinámico (Int) | Longitud del documento actual $D$. |
-| $f(q_i, D)$ | `tf` | Dinámico (Int) | Frecuencia (apariciones) de la palabra $q_i$ en el documento $D$. |
-| $k_1$ | `k1` | **$1.5$** | Factor de saturación del término frecuencia. |
-| $b$ | `b` | **$0.75$** | Factor de penalización por longitud del documento. |
+| $N$ | `N` | Dinámico (Float) | Número total de líneas/páginas indexadas (`lineas_documento`). |
+| $n(q_i)$ | `df` | Dinámico (Int) | Cantidad de líneas únicas que contienen la palabra clave $q_i$. |
+| $\text{avgdl}$ | `avgdl` | Dinámico (Float) | Longitud promedio (cantidad de palabras) de todas las líneas en el corpus. |
+| $|D|$ | `doc_len` | Dinámico (Int) | Cantidad de palabras en la línea actual. |
+| $f(q_i, D)$ | `tf` | Dinámico (Int) | Frecuencia de la palabra $q_i$ en la línea de texto evaluada. |
+| $k_1$ | `k1` | **$1.2$** | Factor de saturación del término frecuencia. |
+| $b$ | `b` | **$0.75$** | Factor de penalización por la longitud de la línea. |
 
 ---
 
-### Implementación en la aplicación
-- En `app.py`, el sistema calcula dinámicamente el puntaje al vuelo.
-- Se hace una "gran división" inicial: Los documentos que contienen **todas** las palabras de búsqueda se colocan en el Bloque A. Los que contienen solo **algunas**, en el Bloque B.
-- Dentro de cada bloque, los documentos se ordenan de **mayor a menor usando su puntaje BM25**, garantizando resultados altamente precisos y relevantes en la cima de la página.
+### 3.2. Optimización por Proximidad y Frase Exacta
+
+El motor evalúa las diferencias en las posiciones físicas entre los términos de búsqueda que sí coincidieron en el fragmento.
+Si dos o más términos de la consulta aparecen en la misma línea, se calcula el menor "span" o ventana de la frase:
+$$\text{span} = \max(\text{posiciones}) - \min(\text{posiciones})$$
+La distancia absoluta adicional es:
+$$\text{distancia} = \text{span} - (k - 1)$$
+Donde $k$ es el número de términos buscados presentes. Si la distancia es corta ($\le 3$), se inyecta un bono multiplicador al score total de BM25:
+- **Distancia = 0 (Adyacentes)** ➔ Bono de 2.0x (100% de aumento).
+- **Distancia = 1** ➔ Bono de 1.5x (50% de aumento).
+- **Distancia = 2** ➔ Bono de 1.33x (33% de aumento).
+- **Distancia = 3** ➔ Bono de 1.25x (25% de aumento).
+- **Distancia > 3** o menos de 2 términos presentes ➔ Sin bono (1.0x).
+
+Esto eleva la relevancia de oraciones coherentes y frases exactas por encima de las apariciones aisladas.
 
 ---
 
-## 3. Estructura del Aplicativo
+### 3.3. Extracción Dinámica de Snippets (KWIC - Key Word In Context)
 
-El backend y frontend de la aplicación web interactúan con la base de datos para ofrecer la experiencia de búsqueda al usuario final.
+Con las 10 líneas de mayor puntuación ordenadas descendentemente:
+1. **Punto de anclaje**: Localiza la primera coincidencia del término de consulta en el texto.
+2. **Recorte de ventana**: Recorta y recupera un sub-fragmento del texto que cubre hasta 8 palabras antes de la primera coincidencia y hasta 8 palabras después de la última coincidencia.
+3. **Resaltado**: Envuelve las palabras consultadas en etiquetas semánticas HTML `<b>palabra</b>`.
+
+---
+
+### 3.4. Ensamblaje de Enlaces de Acceso Profundo (Deep Links)
+
+Realiza un `JOIN` entre `lineas_documento` y `documentos_indexados` a través de `id_drive`.
+El enlace final se construye concatenando el visor web de Drive con el parámetro hash de la línea correspondiente:
+$$\text{Deep Link} = \text{url\_acceso} + \text{"\#line="} + \text{numero\_linea}$$
+Si el archivo original es una imagen indexada mediante OCR, el enlace redirige de manera predeterminada a la página 1.
+
+---
+
+## 4. Estructura del Aplicativo
+
+El aplicativo web de DocUNI consta de tres partes principales interactuando en tiempo real:
 
 - **Backend (Python + Flask)**:
-  - **`aplicativo/app.py`**: Es el núcleo de la aplicación. Expone una ruta estática para la interfaz (`/`) y una API RESTful en `/api/search`. Esta API recibe la consulta, hace limpieza de las palabras, consulta el índice inverso en PostgreSQL usando arrays, ejecuta las matemáticas del modelo BM25 y pagina los resultados en bloques de 10.
-  - **`db_config.py`**: Contiene las credenciales y configuración extraída de variables de entorno (Docker) para conectarse a PostgreSQL mediante la librería `psycopg2`.
+  - **`aplicativo/app.py`**: Recibe las consultas del cliente, limpia y tokeniza términos, consulta la base de datos PostgreSQL, aplica las fórmulas matemáticas de BM25 y cálculo de proximidad, y pagina el JSON de respuesta.
+  - **`db_config.py`**: Configuración de conexión mediante `psycopg2`.
 
 - **Frontend (Vanilla Web)**:
-  - **`aplicativo/templates/index.html`**: Estructura principal de la interfaz visual. Incluye un diseño moderno y responsivo con estética "glassmorphism", implementando indicadores de estado (Loading, Vacío, Sin resultados).
-  - **`aplicativo/static/css/style.css`**: Hoja de estilos en cascada pura con variables CSS, animaciones suaves, efectos de hover y una paleta de colores oscura, brindando un acabado "premium".
-  - **`aplicativo/static/js/main.js`**: Controlador del lado del cliente. Escucha el formulario de búsqueda, se comunica asíncronamente con el endpoint `/api/search` usando `fetch`, maneja la paginación dinámica y construye dinámicamente el HTML de las tarjetas de resultados donde se exhiben los detalles, el puntaje BM25 y enlaces a Drive.
-
-- **Base de Datos (PostgreSQL)**:
-  - Consiste en dos tablas optimizadas y debidamente indexadas para dar soporte a búsquedas en milisegundos. Para ver el detalle técnico del diccionario de datos y diagramas, consulta la sección **[4. Modelo y Diseño de la Base de Datos](#4-modelo-y-diseño-de-la-base-de-datos)**.
+  - **`aplicativo/templates/index.html`**: Layout responsivo y elegante con estética premium *glassmorphism*.
+  - **`aplicativo/static/css/style.css`**: Hoja de estilos pura en CSS oscuro con animaciones y efectos dinámicos.
+  - **`aplicativo/static/js/main.js`**: Manejador del cliente que realiza peticiones asíncronas (`fetch`) y actualiza dinámicamente el listado de resultados e indicadores de estado.
 
 ---
 
-## 4. Modelo y Diseño de la Base de Datos
+## 5. Modelo y Diseño de la Base de Datos (1NF Schema)
 
-Para una exposición o sustentación técnica, el diseño físico y lógico de la base de datos es clave. El sistema utiliza **PostgreSQL** y cuenta con dos tablas principales y un conjunto de índices optimizados.
+Para la máxima eficiencia, las tablas se modelan de manera atómica relacional pura.
 
-### Relación de Datos (ERD Lógico)
-A continuación se ilustra la relación entre las tablas mediante un diagrama de entidad-relación (ERD):
+### 5.1. Relación de Datos (ERD Lógico)
 
 ```mermaid
 erDiagram
     documentos_indexados {
-        SERIAL id PK "Entero auto-incremental (32 bits)"
-        VARCHAR id_drive UK "Identificador único de Google Drive (hasta 3,200 bits)"
-        VARCHAR nombre_original "Nombre del archivo (hasta 8,160 bits)"
-        VARCHAR nombre_compuesto "Nombre compuesto (hasta 16,000 bits)"
-        VARCHAR categoria_principal "Categoría (hasta 4,800 bits)"
-        TEXT url_acceso "URL del documento (longitud variable)"
-        TIMESTAMP fecha_indexacion "Fecha/Hora (64 bits)"
-        BOOLEAN procesado "Estado (8 bits)"
-        INTEGER longitud "Cantidad de palabras (32 bits)"
+        VARCHAR id_drive PK "Identificador único de Google Drive (hasta 50 caracteres)"
+        VARCHAR nombre_compuesto "Nombre compuesto (hasta 300 caracteres)"
+        VARCHAR url_acceso "URL de acceso (hasta 300 caracteres)"
+        BOOLEAN procesado "Estado de procesamiento"
+        VARCHAR primera_carpeta "Subcarpeta principal en la que reside (hasta 100 caracteres)"
     }
-    indice_docu_uni {
-        SERIAL id PK "Entero auto-incremental (32 bits)"
-        VARCHAR palabra UK "Token único indexado (hasta 4,800 bits)"
-        JSONB documentos "Arreglo con id_drive y frecuencias (longitud variable)"
+    lineas_documento {
+        SERIAL id_linea PK "Entero auto-incremental (32 bits)"
+        VARCHAR id_drive FK "Referencia a documentos_indexados(id_drive)"
+        INTEGER numero_fila "Número de página/fila en el documento de origen"
+        TEXT texto_fila "Texto de la página/fila"
     }
-    indice_docu_uni }o--o{ documentos_indexados : "asocia lógicamente (JSONB.id_drive -> id_drive)"
+    indice_invertido_uni {
+        VARCHAR palabra PK "Término normalizado y procesado (hasta 150 caracteres)"
+        INTEGER id_linea PK, FK "Referencia a lineas_documento(id_linea)"
+        INTEGER posicion PK "Posición de la palabra en la línea (0-indexed)"
+    }
+    documentos_indexados ||--o{ lineas_documento : "contiene"
+    lineas_documento ||--o{ indice_invertido_uni : "indexa"
 ```
 
-### Detalle Técnico de Tablas (Diccionario de Datos)
+---
+
+### 5.2. Diccionario de Datos
 
 #### - Tabla: `documentos_indexados`
-Esta tabla registra la información de catálogo, metadatos y longitudes de los documentos académicos.
+Registra la información del catálogo de documentos académicos.
 
-| Campo (Nombre) | Tipo de Variable (PostgreSQL) | Longitud (en bits) | Descripción / Propósito |
+| Campo | Tipo | Restricción | Descripción / Propósito |
 | :--- | :--- | :--- | :--- |
-| **`id`** | `SERIAL` (INTEGER) | **32 bits** (4 bytes) | Clave primaria autoincremental de la tabla. |
-| **`id_drive`** | `VARCHAR(100)` | **Hasta 3,200 bits** *(1)* | Identificador único del archivo en Google Drive (Clave Única / Restricción `UNIQUE`). |
-| **`nombre_original`** | `VARCHAR(255)` | **Hasta 8,160 bits** *(1)* | Nombre del archivo físico original tal como fue subido por el alumno. |
-| **`nombre_compuesto`** | `VARCHAR(500)` | **Hasta 16,000 bits** *(1)* | Nombre normalizado o estructurado que facilita la identificación. |
-| **`categoria_principal`** | `VARCHAR(150)` | **Hasta 4,800 bits** *(1)* | Especialidad o categoría académica principal (ej. *Sistemas Operativos*). |
-| **`url_acceso`** | `TEXT` | **Variable** *(2)* | Dirección URL directa del recurso digital para visualizarlo o descargarlo. |
-| **`fecha_indexacion`** | `TIMESTAMP` | **64 bits** (8 bytes) | Fecha y hora de inserción del registro (default: `CURRENT_TIMESTAMP`). |
-| **`procesado`** | `BOOLEAN` | **8 bits** (1 byte físico) | Bandera que indica si el documento ya ha sido analizado e incorporado al índice. |
-| **`longitud`** | `INTEGER` | **32 bits** (4 bytes) | Número de palabras totales del documento (crítico para penalización BM25). |
-
-> *(1) Nota sobre VARCHAR:* PostgreSQL almacena `VARCHAR` usando codificación UTF-8. Un carácter puede consumir de 1 a 4 bytes (8 a 32 bits). En codificación básica ASCII, la longitud máxima es de 8 bits por carácter; el cálculo superior asume el peor escenario de 32 bits por carácter UTF-8.
-> *(2) Nota sobre TEXT:* El tipo `TEXT` tiene una longitud variable que admite hasta 1 GB de información (~8.58 × 10⁹ bits) por registro.
+| **`id_drive`** | `VARCHAR(50)` | `PRIMARY KEY` | Identificador de Google Drive único por archivo. |
+| **`nombre_compuesto`** | `VARCHAR(300)` | `NOT NULL` | Ruta lógica y nombre del material. |
+| **`url_acceso`** | `VARCHAR(300)` | `NOT NULL` | Dirección de vista previa en Google Drive. |
+| **`procesado`** | `BOOLEAN` | `NOT NULL DEFAULT FALSE` | Estado que confirma si el archivo ya fue procesado por el batch. |
+| **`primera_carpeta`** | `VARCHAR(100)` | - | Nombre de la primera subcarpeta contenedora. |
 
 ---
 
-#### 📋 Tabla: `indice_docu_uni`
-Esta tabla representa el **Índice Inverso**, donde se asocia cada palabra con los documentos que la contienen.
+#### - Tabla: `lineas_documento`
+Almacena el texto fragmentado a nivel de fila o página (Forward Index).
 
-| Campo (Nombre) | Tipo de Variable (PostgreSQL) | Longitud (en bits) | Descripción / Propósito |
+| Campo | Tipo | Restricción | Descripción / Propósito |
 | :--- | :--- | :--- | :--- |
-| **`id`** | `SERIAL` (INTEGER) | **32 bits** (4 bytes) | Clave primaria autoincremental de la tabla. |
-| **`palabra`** | `VARCHAR(150)` | **Hasta 4,800 bits** *(1)* | Token o palabra única indexada del vocabulario general (Clave Única / `UNIQUE`). |
-| **`documentos`** | `JSONB` | **Variable** *(3)* | Estructura JSON binaria que almacena un arreglo con el `id_drive` y la frecuencia (`tf`) de la palabra en cada archivo. |
+| **`id_linea`** | `SERIAL` | `PRIMARY KEY` | Identificador único autoincremental de la línea de texto. |
+| **`id_drive`** | `VARCHAR(50)` | `REFERENCES documentos_indexados` | Clave foránea al documento de origen. |
+| **`numero_fila`** | `INTEGER` | `NOT NULL` | Número de página real o fila en el archivo original. |
+| **`texto_fila`** | `TEXT` | `NOT NULL` | Texto extraído original de la página. |
 
-> *(3) Nota sobre JSONB:* El tipo de dato JSON binario almacena colecciones estructuradas optimizadas de forma física. Al igual que `TEXT`, su límite superior físico en PostgreSQL es de 1 GB (~8.58 × 10⁹ bits).
+*Restricción UNIQUE*: `(id_drive, numero_fila)` evita el registro duplicado de filas para un mismo archivo.
 
 ---
 
-### Índices de Rendimiento y Optimización
-Para lograr tiempos de respuesta en milisegundos durante las consultas del algoritmo BM25, se implementaron dos índices fundamentales:
+#### - Tabla: `indice_invertido_uni`
+Mapea de forma posicional atómica cada token con la línea de origen (Índice Inverso).
 
-1. **`idx_indice_palabra` (B-Tree sobre `palabra`)**:
-   - Permite que la búsqueda exacta de un token en la tabla `indice_docu_uni` sea de complejidad temporal $O(\log n)$, localizando el registro de manera casi instantánea.
-2. **`idx_jsonb_documentos` (GIN - Generalized Inverted Index sobre `documentos`)**:
-   - Un índice GIN está especialmente diseñado para colecciones y objetos compuestos como `JSONB`. Permite indexar las claves internas y elementos del JSON de forma que Postgres pueda resolver consultas de contención o filtrado directo sin hacer un escaneo completo de la tabla (*sequential scan*).
+| Campo | Tipo | Restricción | Descripción / Propósito |
+| :--- | :--- | :--- | :--- |
+| **`palabra`** | `VARCHAR(150)` | `PRIMARY KEY (1/3)` | Término normalizado y procesado. |
+| **`id_linea`** | `INTEGER` | `PRIMARY KEY (2/3), REFERENCES lineas_documento` | Clave foránea a la línea de origen. |
+| **`posicion`** | `INTEGER` | `PRIMARY KEY (3/3)` | Índice de la posición del token en la línea (0-indexed). |
 
+*Llave Primaria Compuesta*: `(palabra, id_linea, posicion)` garantiza la consistencia e integridad relacional.
+
+---
+
+### 5.3. Índices de Rendimiento y Optimización
+1. **`idx_palabra_busqueda` (B-Tree sobre `palabra` en `indice_invertido_uni`)**: Optimiza búsquedas e intersecciones de términos, logrando respuestas en $O(\log n)$ milisegundos.
+2. **`idx_paginas_drive` (B-Tree sobre `id_drive` en `lineas_documento`)**: Acelera las consultas por documento y reconstrucción del Forward Index.

@@ -75,8 +75,8 @@ def obtener_frecuencia_documental(cursor, palabras: list[str]) -> dict[str, int]
 
 def ejecutar_consulta_sql(cursor, palabras: list[str]) -> list[tuple]:
     """
-    Consulta SQL que realiza la intersección AND a nivel de base de datos.
-    Devuelve, para las líneas que contienen TODAS las palabras buscadas,
+    Consulta SQL que realiza la búsqueda en el índice invertido.
+    Devuelve, para las líneas que contienen al menos una de las palabras buscadas,
     el id_linea, id_drive, numero_linea, texto_linea, nombre_compuesto, url_acceso,
     la frecuencia total calculada al vuelo con COUNT() y el diccionario de posiciones
     por cada palabra en formato JSON.
@@ -104,21 +104,20 @@ def ejecutar_consulta_sql(cursor, palabras: list[str]) -> list[tuple]:
         JOIN lineas_documento l ON i.id_linea = l.id_linea
         JOIN documentos_indexados d ON l.id_drive = d.id_drive
         GROUP BY i.id_linea, l.id_drive, l.numero_fila, l.texto_fila, d.nombre_compuesto, d.url_acceso
-        HAVING COUNT(DISTINCT i.palabra) = %s
     """
-    cursor.execute(query, (palabras, len(palabras)))
+    cursor.execute(query, (palabras,))
     return cursor.fetchall()
 
 def calcular_menor_distancia(posiciones_por_palabra: dict, palabras: list[str]) -> int:
     """
     Calcula la distancia absoluta mínima que separa a las palabras de la consulta 
-    en la línea actual utilizando sus arreglos de posiciones.
+    en la línea actual utilizando sus arreglos de posiciones (considerando solo las palabras presentes).
     
     Explicación de la lógica de proximidad (Fórmula de Proximidad):
     1. Si hay menos de 2 palabras en la consulta, la distancia siempre es 0.
-    2. Si están todas las palabras, extraemos las listas de posiciones asociadas a cada palabra.
+    2. Si están al menos dos palabras de la consulta presentes, extraemos las listas de posiciones asociadas.
     3. Usamos combinaciones cartesianas (itertools.product) para evaluar todos los posibles
-       conjuntos de posiciones formados al elegir una posición para cada palabra de la consulta.
+       conjuntos de posiciones formados al elegir una posición para cada palabra presente.
     4. Para cada combinación, el "span" o ventana de la frase es la diferencia entre la 
        posición máxima y la mínima encontrada: span = max(posiciones) - min(posiciones).
     5. El menor span posible para 'k' palabras diferentes es 'k - 1' (cuando aparecen adyacentes).
@@ -130,11 +129,12 @@ def calcular_menor_distancia(posiciones_por_palabra: dict, palabras: list[str]) 
     if len(palabras) < 2:
         return 0
         
-    import itertools
-    posiciones_listas = [posiciones_por_palabra.get(p, []) for p in palabras]
-    
-    if any(not lst for lst in posiciones_listas):
+    palabras_presentes = [p for p in palabras if p in posiciones_por_palabra and posiciones_por_palabra[p]]
+    if len(palabras_presentes) < 2:
         return 99999
+        
+    import itertools
+    posiciones_listas = [posiciones_por_palabra[p] for p in palabras_presentes]
         
     min_span = float('inf')
     for combo in itertools.product(*posiciones_listas):
@@ -142,7 +142,7 @@ def calcular_menor_distancia(posiciones_por_palabra: dict, palabras: list[str]) 
         if span < min_span:
             min_span = span
             
-    distancia = min_span - (len(palabras) - 1)
+    distancia = min_span - (len(palabras_presentes) - 1)
     return int(distancia)
 
 def calcular_relevancia(
@@ -298,7 +298,7 @@ def realizar_busqueda(query_str: str):
         candidatos = ejecutar_consulta_sql(cursor, palabras)
         
         if not candidatos:
-            print("[-] No se encontraron resultados que contengan todas las palabras.")
+            print("[-] No se encontraron resultados para los términos de búsqueda.")
             return
             
         ranking = calcular_relevancia(candidatos, df_dict, N, avgdl, palabras)
